@@ -26,14 +26,29 @@ RUN chmod +x scripts/vendor-third-party.sh \
 
 RUN if [ ! -f assets/videos/badapple.mp4 ]; then \
                         BADAPPLE_URL="${BADAPPLE_MP4_URL:-https://badapple.mov/badapple.mp4}"; \
-            echo "==> Fetching badapple.mp4 from ${BADAPPLE_URL}"; \
-            curl -fL "$BADAPPLE_URL" -o assets/videos/badapple.mp4; \
+                        TMP_BADAPPLE="/tmp/badapple-source.bin"; \
+                        rm -f "$TMP_BADAPPLE"; \
+                        echo "==> Fetching badapple source from ${BADAPPLE_URL}"; \
+                        curl -fL --retry 3 --connect-timeout 20 --max-time 300 \
+                            -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36" \
+                            -H "Accept: video/*,*/*;q=0.8" \
+                            "$BADAPPLE_URL" -o "$TMP_BADAPPLE"; \
+                        if ! ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
+                            -of default=noprint_wrappers=1:nokey=1 "$TMP_BADAPPLE" >/dev/null; then \
+                            echo "WARN: First download was not a valid video stream; retrying with '?download=1'." >&2; \
+                            curl -fL --retry 3 --connect-timeout 20 --max-time 300 \
+                                -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36" \
+                                -H "Accept: video/*,*/*;q=0.8" \
+                                "${BADAPPLE_URL}?download=1" -o "$TMP_BADAPPLE"; \
+                        fi; \
                         ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
-                            -of default=noprint_wrappers=1:nokey=1 assets/videos/badapple.mp4 >/dev/null \
+                            -of default=noprint_wrappers=1:nokey=1 "$TMP_BADAPPLE" >/dev/null \
                             || (echo "ERROR: BADAPPLE_MP4_URL did not resolve to a valid video stream." >&2; \
-                                    echo "       Use a direct media file URL (mp4/mov/webm), not a website landing page." >&2; \
+                                    echo "       URL tried: ${BADAPPLE_URL}" >&2; \
+                                    echo "       Use a direct downloadable media file URL (mp4/mov/webm)." >&2; \
                                     exit 1); \
-        fi
+                        mv "$TMP_BADAPPLE" assets/videos/badapple.mp4; \
+                fi
 
 RUN if [ ! -f web/freedoom1.wad ]; then \
             if [ -n "$FREEDOOM_IWAD_URL" ]; then \
