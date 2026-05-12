@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        BADAPPLE_MP4_URL: ${BADAPPLE_MP4_URL:-https://badapple.mov/}
+        BADAPPLE_MP4_URL: ${BADAPPLE_MP4_URL:-https://badapple.mov/badapple.mp4}
         FREEDOOM_IWAD_URL: ${FREEDOOM_IWAD_URL:-}
         FREEDOOM_ZIP_URL: ${FREEDOOM_ZIP_URL:-https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip}
     ports:

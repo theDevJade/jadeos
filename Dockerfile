@@ -24,20 +24,28 @@ ARG FREEDOOM_ZIP_URL="https://github.com/freedoom/freedoom/releases/download/v0.
 RUN chmod +x scripts/vendor-third-party.sh \
     && ./scripts/vendor-third-party.sh
 
-RUN if [ ! -f assets/videos/badapple.mp4 ] && [ -n "$BADAPPLE_MP4_URL" ]; then \
-            echo "==> Fetching badapple.mp4 from BADAPPLE_MP4_URL"; \
-            curl -fL "$BADAPPLE_MP4_URL" -o assets/videos/badapple.mp4; \
+RUN if [ ! -f assets/videos/badapple.mp4 ]; then \
+                        BADAPPLE_URL="${BADAPPLE_MP4_URL:-https://badapple.mov/badapple.mp4}"; \
+            echo "==> Fetching badapple.mp4 from ${BADAPPLE_URL}"; \
+            curl -fL "$BADAPPLE_URL" -o assets/videos/badapple.mp4; \
+                        ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
+                            -of default=noprint_wrappers=1:nokey=1 assets/videos/badapple.mp4 >/dev/null \
+                            || (echo "ERROR: BADAPPLE_MP4_URL did not resolve to a valid video stream." >&2; \
+                                    echo "       Use a direct media file URL (mp4/mov/webm), not a website landing page." >&2; \
+                                    exit 1); \
         fi
 
 RUN if [ ! -f web/freedoom1.wad ]; then \
             if [ -n "$FREEDOOM_IWAD_URL" ]; then \
                 echo "==> Fetching freedoom1.wad from FREEDOOM_IWAD_URL"; \
                 curl -fL "$FREEDOOM_IWAD_URL" -o web/freedoom1.wad; \
-            elif [ -n "$FREEDOOM_ZIP_URL" ]; then \
-                echo "==> Fetching Freedoom zip from FREEDOOM_ZIP_URL"; \
-                curl -fL "$FREEDOOM_ZIP_URL" -o /tmp/freedoom.zip; \
+            else \
+                FREEDOOM_ZIP_FETCH_URL="${FREEDOOM_ZIP_URL:-https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip}"; \
+                echo "==> Fetching Freedoom zip from ${FREEDOOM_ZIP_FETCH_URL}"; \
+                curl -fL "$FREEDOOM_ZIP_FETCH_URL" -o /tmp/freedoom.zip; \
                 python3 -c "import zipfile,sys; z=zipfile.ZipFile('/tmp/freedoom.zip'); n=next((x for x in z.namelist() if x.lower() == 'freedoom1.wad' or x.lower().endswith('/freedoom1.wad')), None); n or sys.exit('ERROR: freedoom1.wad not found in ZIP'); open('web/freedoom1.wad','wb').write(z.read(n))"; \
             fi; \
+            test -f web/freedoom1.wad || (echo "ERROR: Failed to stage web/freedoom1.wad" >&2; exit 1); \
         fi
 
 RUN chmod +x scripts/export-badapple-media.sh \
