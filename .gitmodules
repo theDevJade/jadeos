@@ -1,0 +1,12 @@
+[submodule "third_party/doomgeneric"]
+	path = third_party/doomgeneric
+	url = https://github.com/ozkl/doomgeneric.git
+[submodule "third_party/arduino-libhelix"]
+	path = third_party/arduino-libhelix
+	url = https://github.com/pschatzmann/arduino-libhelix.git
+[submodule "third_party/h264bsd"]
+	path = third_party/h264bsd
+	url = https://github.com/oneam/h264bsd.git
+[submodule "third_party/minimp4"]
+	path = third_party/minimp4
+	url = https://github.com/lieff/minimp4.git

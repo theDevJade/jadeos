@@ -18,7 +18,7 @@ RUN apt-get update \
 WORKDIR /src
 COPY . .
 
-# Network: downloads stb_image.h. third_party/doomgeneric must be in the build context.
+# Network: downloads stb_image.h. Populate third_party/ (git submodules) before build; see README.
 RUN chmod +x scripts/vendor-third-party.sh \
     && ./scripts/vendor-third-party.sh
 

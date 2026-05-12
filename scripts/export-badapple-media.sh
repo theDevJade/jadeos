@@ -6,6 +6,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INPUT="${BADAPPLE_MP4:-$ROOT/assets/videos/badapple.mp4}"
 OUT="${BADAPPLE_OUT:-$ROOT/assets/videos/badapple}"
+# Max frame width for WASM (smaller PNGs decode much faster). 0 = no cap (full resolution).
+BADAPPLE_MAX_WIDTH="${BADAPPLE_MAX_WIDTH:-640}"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -35,11 +37,18 @@ if [[ -z "$FPS_RAW" ]]; then
 fi
 FPS_FLOAT="$(python3 -c "import fractions,sys; print(float(fractions.Fraction(sys.argv[1])))" "$FPS_RAW")"
 
-echo "==> Export frames (fps=$FPS_RAW -> $FPS_FLOAT) -> $OUT"
+if [[ "$BADAPPLE_MAX_WIDTH" =~ ^[0-9]+$ ]] && [[ "$BADAPPLE_MAX_WIDTH" -gt 0 ]]; then
+  SCALE_VF="fps=${FPS_RAW},scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1,scale=min(iw\\,${BADAPPLE_MAX_WIDTH}):-2:flags=bicubic"
+  echo "==> Export frames (fps=$FPS_RAW -> $FPS_FLOAT, max_width=$BADAPPLE_MAX_WIDTH) -> $OUT"
+else
+  SCALE_VF="fps=${FPS_RAW},scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1"
+  echo "==> Export frames (fps=$FPS_RAW -> $FPS_FLOAT, full width) -> $OUT"
+fi
+
 ffmpeg -nostdin -hide_banner -loglevel error -stats -y \
   -i "$INPUT" \
   -map 0:v:0 \
-  -vf "fps=${FPS_RAW},scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1" \
+  -vf "$SCALE_VF" \
   -start_number 1 \
   "$OUT/frame_%06d.png"
 

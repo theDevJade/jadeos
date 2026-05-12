@@ -159,7 +159,7 @@ struct PcmWavReader {
     void pump_for_video_tick(std::uint32_t seq_tick_div) {
         if (!f || data_end <= data_begin || seq_tick_div == 0)
             return;
-        if (jade::audio::queued_stereo_frames() > 48000u / 4u)
+        if (jade::audio::queued_stereo_frames() > 48000u * 2u)
             return;
 
         rem_num += static_cast<std::int64_t>(sample_rate) * static_cast<std::int64_t>(seq_tick_div);
@@ -229,6 +229,7 @@ struct os::MediaPlayerImpl {
 
     int                        pic_w = 0, pic_h = 0;
     std::vector<std::uint32_t> last_rgba;
+    std::vector<std::uint8_t>  blit_staging;
 
     std::string err;
 
@@ -493,8 +494,8 @@ struct os::MediaPlayerImpl {
         if (kStagingPhys + need > mem->size())
             return;
 
-        std::vector<std::uint8_t> staging(need);
-        auto* dst32 = reinterpret_cast<std::uint32_t*>(staging.data());
+        blit_staging.resize(need);
+        auto* dst32 = reinterpret_cast<std::uint32_t*>(blit_staging.data());
         for (int y = 0; y < dh; ++y) {
             const int sy = static_cast<int>((static_cast<std::int64_t>(y) * 2 + 1) * sh /
                                             (static_cast<std::int64_t>(dh) * 2));
@@ -509,7 +510,7 @@ struct os::MediaPlayerImpl {
         }
 
         if (std::uint8_t* phys = mem->raw_ptr_mut(kStagingPhys))
-            std::memcpy(phys, staging.data(), need);
+            std::memcpy(phys, blit_staging.data(), need);
         else
             return;
 

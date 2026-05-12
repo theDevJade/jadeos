@@ -12,7 +12,7 @@ A toy OS in the browser: tiled windows, a terminal, small apps, optional Freedoo
 
 - **Native test**: Meson, Ninja, a C++20 compiler.
 - **Web build**: `emcc` and `em++` on your `PATH`, plus Meson and Ninja.
-- **`third_party/`**: commit it, or run `./scripts/vendor-third-party.sh` once (downloads **stb_image.h** only). It **does not** fetch **doomgeneric** (that tree is Jade-specific and must already be in the repo).
+- **`third_party/`**: several trees are **git submodules** (see `.gitmodules`). After clone run `git submodule update --init --recursive`. `./scripts/vendor-third-party.sh` downloads **stb_image.h** and will run submodule init automatically **only when `.git` exists** (not inside a plain Docker `COPY` build).
 
 ## Vendor script (CI or clean clone)
 
@@ -32,7 +32,7 @@ meson setup build_native --wipe && meson compile -C build_native
 ./build_native/src/jadeportfolio
 ```
 
-**Bad Apple clip (optional):** install **ffmpeg**, place `assets/videos/badapple.mp4` (gitignored), then run `./scripts/export-badapple-media.sh` or just **`./serve.sh`**, which regenerates outputs when `sequence.txt` is missing.
+**Bad Apple clip (optional):** install **ffmpeg**, place `assets/videos/badapple.mp4` (gitignored), then run `./scripts/export-badapple-media.sh` or just **`./serve.sh`**, which regenerates outputs when `sequence.txt` is missing. For smoother WASM playback, frames are capped to **640px width** by default (`BADAPPLE_MAX_WIDTH`; set `0` for full resolution).
 
 **Serve** (copies `index.html`, JS/WASM, font, `media/`, and optional Freedoom IWAD; see `serve.sh`):
 
@@ -51,7 +51,10 @@ The **`Dockerfile`** runs **`scripts/vendor-third-party.sh`**, optionally **`scr
 docker build -t jadeportfolio .
 ```
 
-Your build context must include **`third_party/doomgeneric`** with the Jade integration files.
+Your build context must include **populated `third_party/`** (submodule trees). Either:
+
+1. **CI / Coolify:** enable **submodule checkout** on the repo, *or* run `git submodule update --init --recursive` in a pre-build step so `third_party/*` is on disk before `docker build`, **or**
+2. **Vendor locally:** run `git submodule update --init --recursive` then `docker build` from that machine (the context will contain the files; `.dockerignore` does not exclude `third_party/`).
 
 ## Fonts and media
 

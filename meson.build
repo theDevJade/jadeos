@@ -19,7 +19,7 @@ if host_machine.system() == 'emscripten'
   web_link_flags += [
     '-sALLOW_MEMORY_GROWTH=1',
     '-sINITIAL_MEMORY=268435456',   # 256 MiB
-    '-sMAXIMUM_MEMORY=2147483648',  # 2 GiB cap (HiDPI + Freedoom + guest RAM)
+    '-sMAXIMUM_MEMORY=4294967296',  # 4 GiB cap (HiDPI + Freedoom + guest RAM)
     '-sEXPORTED_RUNTIME_METHODS=["ccall","cwrap","HEAPU8","HEAPU32","FS"]',
     '-sFORCE_FILESYSTEM=1',
     '-sEXPORT_ES6=1',
