@@ -36,9 +36,7 @@ RUN if [ ! -f web/freedoom1.wad ]; then \
             elif [ -n "$FREEDOOM_ZIP_URL" ]; then \
                 echo "==> Fetching Freedoom zip from FREEDOOM_ZIP_URL"; \
                 curl -fL "$FREEDOOM_ZIP_URL" -o /tmp/freedoom.zip; \
-                python3 -c "import zipfile,sys; z=zipfile.ZipFile('/tmp/freedoom.zip'); n=next((x for x in z.namelist() if x.lower().endswith('freedoom1.wad')), None);\
-if not n: sys.stderr.write('ERROR: freedoom1.wad not found in ZIP\\n') or sys.exit(1);\
-open('web/freedoom1.wad','wb').write(z.read(n))"; \
+                python3 -c "import zipfile,sys; z=zipfile.ZipFile('/tmp/freedoom.zip'); n=next((x for x in z.namelist() if x.lower() == 'freedoom1.wad' or x.lower().endswith('/freedoom1.wad')), None); n or sys.exit('ERROR: freedoom1.wad not found in ZIP'); open('web/freedoom1.wad','wb').write(z.read(n))"; \
             fi; \
         fi
 
