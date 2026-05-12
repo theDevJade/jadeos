@@ -43,9 +43,28 @@ ensure_submodule() {
   local marker="$ROOT/build/.jade-vendor/${path//\//__}.sha"
   mkdir -p "$(dirname "$marker")"
 
-  if [[ -f "$marker" ]] && [[ "$(cat "$marker" 2>/dev/null || true)" == "$sha" ]] && [[ -d "$path/.git" || -f "$path/.git" ]]; then
+  # Coolify (and any host that does `git submodule update --init` before
+  # `docker build`) leaves a `.git` *file* gitlink inside each submodule
+  # pointing at `../../.git/modules/<path>`. .dockerignore strips the parent
+  # `.git/` from the build context, so the gitlink target is missing inside
+  # the image and `git -C <path> ...` fails with "not a git repository".
+  # Detect that case and treat the working tree as not populated.
+  local broken_gitlink=0
+  if [[ -e "$path/.git" ]] && ! git -C "$path" rev-parse --git-dir >/dev/null 2>&1; then
+    broken_gitlink=1
+  fi
+
+  if [[ "$broken_gitlink" -eq 0 ]] \
+     && [[ -f "$marker" ]] \
+     && [[ "$(cat "$marker" 2>/dev/null || true)" == "$sha" ]] \
+     && [[ -d "$path/.git" || -f "$path/.git" ]]; then
     echo "==> $path: already at $sha (skipping fetch)"
     return 0
+  fi
+
+  if [[ "$broken_gitlink" -eq 1 ]]; then
+    echo "==> $path: broken submodule gitlink (host-side checkout w/o .git/modules); re-cloning"
+    rm -rf "$path"
   fi
 
   if [[ "$PARENT_HAS_GIT" -eq 1 ]] && git -C "$ROOT" submodule status -- "$path" >/dev/null 2>&1; then
