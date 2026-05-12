@@ -26,6 +26,41 @@
 #include "m_misc.h"
 #include "midifile.h"
 
+/* ===== Jade compatibility shims for this older doomgeneric snapshot.
+ * Modern chocolate-doom relies on three helpers that aren't in this fork:
+ *   SDL_SwapBE16 / SDL_SwapBE32 — big-endian byte-swap (MIDI is BE).
+ *   I_Realloc                  — realloc that aborts on OOM.
+ *   M_fopen                    — portable fopen wrapper.
+ * Provide thin equivalents here so the file compiles unchanged.
+ */
+static inline unsigned short jade_swap_be16(unsigned short v)
+{
+    return (unsigned short)(((v & 0x00FFu) << 8) | ((v & 0xFF00u) >> 8));
+}
+static inline unsigned int jade_swap_be32(unsigned int v)
+{
+    return ((v & 0x000000FFu) << 24) | ((v & 0x0000FF00u) << 8) |
+           ((v & 0x00FF0000u) >> 8)  | ((v & 0xFF000000u) >> 24);
+}
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#  define SDL_SwapBE16(x) ((unsigned short)(x))
+#  define SDL_SwapBE32(x) ((unsigned int)(x))
+#else
+#  define SDL_SwapBE16(x) jade_swap_be16((unsigned short)(x))
+#  define SDL_SwapBE32(x) jade_swap_be32((unsigned int)(x))
+#endif
+static inline void* I_Realloc(void* p, size_t sz)
+{
+    void* n = realloc(p, sz);
+    if (n == NULL && sz != 0u)
+    {
+        /* MIDI files are tiny; this practically never fires. */
+        I_Error("midifile: realloc(%zu) failed", sz);
+    }
+    return n;
+}
+#define M_fopen(path, mode) fopen((path), (mode))
+
 #define HEADER_CHUNK_ID "MThd"
 #define TRACK_CHUNK_ID  "MTrk"
 #define MAX_BUFFER_SIZE 0x10000

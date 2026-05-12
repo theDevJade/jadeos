@@ -1673,7 +1673,7 @@ static void *I_OPL_RegisterSong(void *data, int len)
 
     // remove file now
 
-    M_remove(filename);
+    remove(filename); /* Jade: was M_remove; not in older doomgeneric's m_misc. */
     free(filename);
 
     return result;
@@ -1777,7 +1777,8 @@ const static snddevice_t music_opl_devices[] =
     SNDDEVICE_SB,
 };
 
-const music_module_t music_opl_module =
+/* Jade: drop `const` to match doomgeneric's `extern music_module_t` decl in i_sound.h. */
+music_module_t music_opl_module =
 {
     music_opl_devices,
     arrlen(music_opl_devices),

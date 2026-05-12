@@ -40,6 +40,7 @@ m_misc.c
 m_random.c
 memio.c
 midifile.c
+mus2mid.c
 p_ceilng.c
 p_doors.c
 p_enemy.c

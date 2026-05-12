@@ -8,9 +8,14 @@ Paths are from the repo root.
 
 | Component | Location | License (short) | Notes |
 |-----------|----------|-----------------|--------|
-| **doomgeneric** (from Chocolate Doom lineage) | `third_party/doomgeneric/` | **GPL-2.0 or later** | `third_party/doomgeneric/LICENSE`. Freedoom IWAD is a separate download. |
+| **doomgeneric** (from Chocolate Doom lineage) | `third_party/doomgeneric/` (submodule, pinned in `third_party/SUBMODULES.txt`) | **GPL-2.0 or later** | `third_party/doomgeneric/LICENSE`. Freedoom IWAD is a separate download. |
 | **OPL** | `third_party/opl/` | **GPL-2.0+** | See headers in `opl*.c`. |
 | **stb_image.h** | `third_party/stb/stb_image.h` | **Public domain / MIT** (see stb repo) | [stb](https://github.com/nothings/stb). Single header, no warranty. |
+| **Chocolate Doom (OPL music engine)** | `third_party/patches/doomgeneric/overlay/doomgeneric/i_oplmusic.c`, `midifile.c`, `midifile.h` | **GPL-2.0+** | Vendored from [`chocolate-doom`](https://github.com/chocolate-doom/chocolate-doom) `src/` and copied into the doomgeneric tree by the vendor script. Used by the Jade WASM build to render OPL3 music. |
+
+Jade-specific patches and overlay files under `third_party/patches/` inherit
+the license of the file they modify (GPL-2.0+ for everything in doomgeneric,
+including the OPL music engine and `midifile.c`).
 
 ## Fonts and demo media
 

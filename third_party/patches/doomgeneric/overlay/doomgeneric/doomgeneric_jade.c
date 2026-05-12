@@ -43,10 +43,9 @@ extern void     jade_pcm_submit_stereo_i16(const int16_t* interleaved, uint32_t 
 extern uint32_t jade_pcm_queued_frames(void);
 extern uint32_t jade_pcm_sample_rate(void);
 
-/* i_oplmusic.c expects this global; chocolate-doom defines it inside
- * i_sdlmusic.c which we don't compile. Driver-specific port base value is
- * unused by opl_jade. */
-int opl_io_port = 0;
+/* `opl_io_port` is defined inside i_oplmusic.c (overlay), so it is already
+ * provided to the link; we just declare it for clarity (chocolate-doom puts
+ * the definition in i_sdlmusic.c which we don't compile). */
 
 /* i_sound.c references these via M_BindVariable when FEATURE_SOUND is defined.
  * Upstream chocolate-doom defines them inside i_sdlsound.c (not compiled). */

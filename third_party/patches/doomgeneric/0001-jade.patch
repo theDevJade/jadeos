@@ -1,3 +1,20 @@
+diff --git a/doomgeneric/doomtype.h b/doomgeneric/doomtype.h
+index dc14bc5..d014f5e 100644
+--- a/doomgeneric/doomtype.h
++++ b/doomgeneric/doomtype.h
+@@ -52,6 +52,12 @@
+ #define PACKEDATTR
+ #endif
+ 
++// PACKED_STRUCT(name_or_body) — chocolate-doom helper used by i_oplmusic.c
++// (GENMIDI parser) to declare structs with their on-disk byte layout. This
++// upstream doomgeneric snapshot does not ship it; add it here so the overlay
++// pulls the same macro form chocolate-doom uses upstream.
++#define PACKED_STRUCT(...) struct __VA_ARGS__ PACKEDATTR
++
+ // C99 integer types; with gcc we just use this.  Other compilers 
+ // should add conditional statements that define the C99 types.
+ 
 diff --git a/doomgeneric/i_sound.c b/doomgeneric/i_sound.c
 index c80a9d1..1a714a8 100644
 --- a/doomgeneric/i_sound.c
