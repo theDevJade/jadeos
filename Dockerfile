@@ -17,12 +17,39 @@ RUN apt-get update \
 WORKDIR /src
 COPY . .
 
+ARG BADAPPLE_MP4_URL=""
+ARG FREEDOOM_IWAD_URL=""
+ARG FREEDOOM_ZIP_URL="https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip"
+
 RUN chmod +x scripts/vendor-third-party.sh \
     && ./scripts/vendor-third-party.sh
 
+RUN if [ ! -f assets/videos/badapple.mp4 ] && [ -n "$BADAPPLE_MP4_URL" ]; then \
+            echo "==> Fetching badapple.mp4 from BADAPPLE_MP4_URL"; \
+            curl -fL "$BADAPPLE_MP4_URL" -o assets/videos/badapple.mp4; \
+        fi
+
+RUN if [ ! -f web/freedoom1.wad ]; then \
+            if [ -n "$FREEDOOM_IWAD_URL" ]; then \
+                echo "==> Fetching freedoom1.wad from FREEDOOM_IWAD_URL"; \
+                curl -fL "$FREEDOOM_IWAD_URL" -o web/freedoom1.wad; \
+            elif [ -n "$FREEDOOM_ZIP_URL" ]; then \
+                echo "==> Fetching Freedoom zip from FREEDOOM_ZIP_URL"; \
+                curl -fL "$FREEDOOM_ZIP_URL" -o /tmp/freedoom.zip; \
+                python3 -c "import zipfile,sys; z=zipfile.ZipFile('/tmp/freedoom.zip'); n=next((x for x in z.namelist() if x.lower().endswith('freedoom1.wad')), None);\
+if not n: sys.stderr.write('ERROR: freedoom1.wad not found in ZIP\\n') or sys.exit(1);\
+open('web/freedoom1.wad','wb').write(z.read(n))"; \
+            fi; \
+        fi
+
 RUN chmod +x scripts/export-badapple-media.sh \
-    && (test -f assets/videos/badapple.mp4 \
-        && BADAPPLE_MP4=assets/videos/badapple.mp4 ./scripts/export-badapple-media.sh || true)
+        && if test -f assets/videos/badapple.mp4; then \
+                 BADAPPLE_MP4=assets/videos/badapple.mp4 ./scripts/export-badapple-media.sh; \
+             else \
+                 echo "ERROR: Missing assets/videos/badapple.mp4 and BADAPPLE_MP4_URL not provided." >&2; \
+                 echo "       Production build requires generating /media/badapple assets." >&2; \
+                 exit 1; \
+             fi
 
 RUN meson setup /build --cross-file=cross/emscripten.ini \
     && meson compile -C /build
@@ -35,8 +62,8 @@ RUN mkdir -p /opt/site/media \
     && (test -f assets/images/amazingimage.png \
         && cp assets/images/amazingimage.png /opt/site/media/amazingimage.png || true) \
     && mkdir -p /opt/site/media/badapple \
-    && (test -f assets/videos/badapple/sequence.txt \
-        && cp -R assets/videos/badapple/* /opt/site/media/badapple/ || true)
+        && test -f assets/videos/badapple/sequence.txt \
+        && cp -R assets/videos/badapple/* /opt/site/media/badapple/
 
 FROM nginx:1.27-alpine
 

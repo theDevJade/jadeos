@@ -90,7 +90,13 @@ if [[ -f "$BADAPPLE_SRC/sequence.txt" ]]; then
   echo "==> Media: staged $SERVE_DIR/media/badapple/ (PNG sequence + audio.wav)"
 else
   mkdir -p "$SERVE_DIR/media/badapple"
-  echo "==> Media: $SERVE_DIR/media/badapple/ left empty (add badapple.mp4 and run scripts/export-badapple-media.sh)"
+  if [[ -f "$BADAPPLE_SRC/sequence.example.txt" ]]; then
+    cp "$BADAPPLE_SRC/sequence.example.txt" "$SERVE_DIR/media/badapple/sequence.example.txt"
+    cp "$BADAPPLE_SRC/sequence.example.txt" "$SERVE_DIR/media/badapple/sequence.txt"
+    echo "==> Media: staged fallback manifest at $SERVE_DIR/media/badapple/sequence.txt (no clip frames present)"
+  else
+    echo "==> Media: $SERVE_DIR/media/badapple/ left empty (add badapple.mp4 and run scripts/export-badapple-media.sh)"
+  fi
 fi
 
 stage_freedoom_iwad "$SERVE_DIR" || true

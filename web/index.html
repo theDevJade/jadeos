@@ -779,7 +779,10 @@ struct BVo { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
           try { mod.FS.mkdir('/media'); } catch (_) { /* exists */ }
           try { mod.FS.mkdir('/media/badapple'); } catch (_) { /* exists */ }
 
-          const seqResp = await fetch('./media/badapple/sequence.txt');
+          let seqResp = await fetch('./media/badapple/sequence.txt');
+          if (!seqResp.ok) {
+            seqResp = await fetch('./media/badapple/sequence.example.txt');
+          }
           if (!seqResp.ok) {
             return;
           }

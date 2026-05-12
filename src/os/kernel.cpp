@@ -305,8 +305,10 @@ static constexpr const char* ABOUT_LINES[] = {
     "Obsessed with the lowest level things: graphics, OS kernels, and demolishing school IT departments.",
     "OS kernels, CPU emulators, compilers,",
     "GPU rasterizers, and anything that touches bare metal.",
+    "Vulkan enjoyer, and number 1 enemy.",
     "",
-    "Currently: Knull + Vixen, a huge space game written in scratch in Rust, and Mixtape, an open source music player for all platforms written in Flutter.",
+    "Currently: Knull + Vixen, a huge space game written in scratch in Rust,",
+    " and Mixtape, an open source music player for all platforms written in Flutter."
 };
 
 struct ContactRow {

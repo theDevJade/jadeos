@@ -1,34 +1,27 @@
-# Jade portfolio (JadeOS)
+# JadeOS
 
-A toy OS in the browser: tiled windows, a terminal, small apps, optional Freedoom (doomgeneric), and **media.app** for a bundled PNG plus a **local-only** MP4-derived frame sequence and WAV (see `scripts/export-badapple-media.sh`).
+My personal portfolio site, built as a fake OS in the browser. It has tiled windows, a terminal, some small apps, and optional Doom (via doomgeneric). There's also a media.app that can show a PNG and play back a Bad Apple frame sequence + audio if you bring your own source video.
 
-## Build
+## Building
 
 ```bash
-./scripts/vendor-third-party.sh       # populate third_party/ + apply Jade patches/overlays
+./scripts/vendor-third-party.sh       # pulls third_party deps and applies my patches
 meson setup build_web --cross-file cross/emscripten.ini
 meson compile -C build_web
 ```
 
-`vendor-third-party.sh` reads pinned commits from `third_party/SUBMODULES.txt`, populates each
-submodule (via `git submodule update --init` when `.git` is present, plain `git clone` otherwise),
-applies any patches under `third_party/patches/<name>/*.patch`, and copies overlay files from
-`third_party/patches/<name>/overlay/`. The Dockerfile runs the same script, so it works in Coolify /
-any Docker build with no parent `.git`.
+`vendor-third-party.sh` pulls pinned commits from `third_party/SUBMODULES.txt`, runs `git submodule update --init` if there's a `.git` dir (or plain `git clone` otherwise), applies patches from `third_party/patches/<name>/`, and drops in any overlay files. The Dockerfile does the same thing, so Docker builds work fine without a parent `.git`.
 
-## Patches and overlays
+## Patching third-party code
 
-Jade-specific changes to upstream third-party code live in `third_party/patches/`, not inside the
-submodule trees, so this repo never needs to fork upstream. See
-[`third_party/patches/README.md`](third_party/patches/README.md) for the layout. After editing
-files inside any `third_party/<name>/` working tree:
+Any changes I make to upstream libs live in `third_party/patches/` rather than directly in the submodule trees. If you edit something under `third_party/<name>/`, regenerate the patch with:
 
 ```bash
-./scripts/regen-third-party-patches.sh   # writes 0001-jade.patch + copies new files into overlay/
+./scripts/regen-third-party-patches.sh
 git add third_party/patches/<name>
 ```
 
 ## Licenses
 
-- **`LICENSE`**: MIT covers **new code** in this repo (`src/`, `web/`, `deploy/`, `third_party/patches/`).
-- **`THIRD_PARTY_NOTICES.md`**: lists doomgeneric (GPLv2), OPL, stb, fonts, demo media.
+- **`LICENSE`**: MIT, covering my own code in `src/`, `web/`, `deploy/`, and `third_party/patches/`.
+- **`THIRD_PARTY_NOTICES.md`**: covers doomgeneric (GPLv2), OPL, stb, fonts, and demo media.
