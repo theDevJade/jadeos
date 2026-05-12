@@ -1,20 +1,3 @@
-/* doomgeneric_jade.c — Jade WASM platform glue for doomgeneric.
- *
- * Pairs with src/os/apps/doom_port.cpp (the C++ side that defines
- * `jade_doom_present` and routes key/mouse events from the JS canvas).
- *
- * Provides:
- *   - DG_Init / DG_DrawFrame / DG_SleepMs / DG_GetTicksMs / DG_GetKey / DG_SetWindowTitle.
- *   - jade_doom_feed_key / jade_doom_feed_mouse (called from doom_port.cpp).
- *   - DG_sound_module: software SFX mixer driving jade::audio (PCM submit).
- *     Reads DMX-format sound lumps via chocolate-doom's W_CacheLumpNum.
- *   - DG_music_module: forwarders to chocolate-doom's music_opl_module
- *     (i_oplmusic.c + midifile.c overlay) backed by third_party/opl/opl_jade.c.
- *     OPL3 samples are mixed into the SFX output buffer each Update().
- *
- * `D_GrabMouseCallback` is provided by chocolate-doom's d_main.c — do NOT
- * redefine it here.
- */
 
 #include "doomgeneric.h"
 #include "doomkeys.h"
