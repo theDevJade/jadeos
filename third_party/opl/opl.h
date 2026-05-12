@@ -32,6 +32,21 @@ typedef enum
     OPL_INIT_OPL3,
 } opl_init_result_t;
 
+// Chocolate-doom's i_oplmusic.c expects this enum to choose between
+// per-version OPL driver quirks (e.g. doom1 1.666 OPL2 emulation, Doom 1.9
+// OPL3 layout). Declared here so i_oplmusic.c compiles against the Jade
+// vendored OPL stack; the current default (`opl_doom_1_9`) is what real
+// Doom 1.9 / Final Doom / Freedoom use.
+typedef enum
+{
+    opl_doom1_1_666,
+    opl_doom2_1_666,
+    opl_doom_1_8,
+    opl_doom_1_9,
+} opl_driver_ver_t;
+
+void I_SetOPLDriverVer(opl_driver_ver_t ver);
+
 typedef enum
 {
     OPL_REGISTER_PORT = 0,

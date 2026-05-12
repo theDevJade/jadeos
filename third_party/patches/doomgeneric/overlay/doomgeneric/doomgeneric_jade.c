@@ -4,13 +4,13 @@
  * `jade_doom_present` and routes key/mouse events from the JS canvas).
  *
  * Provides:
- *   - DG_Init / DG_DrawFrame / DG_SleepMs / DG_GetTicksMs / DG_GetKey / DG_SetWindowTitle
- *   - jade_doom_feed_key / jade_doom_feed_mouse (called from doom_port.cpp)
+ *   - DG_Init / DG_DrawFrame / DG_SleepMs / DG_GetTicksMs / DG_GetKey / DG_SetWindowTitle.
+ *   - jade_doom_feed_key / jade_doom_feed_mouse (called from doom_port.cpp).
  *   - DG_sound_module: software SFX mixer driving jade::audio (PCM submit).
  *     Reads DMX-format sound lumps via chocolate-doom's W_CacheLumpNum.
- *   - DG_music_module: no-op (no OPL music engine is bundled; wire one up here
- *     to play music — e.g. add chocolate-doom's i_oplmusic.c to doom_sources.list
- *     and forward to its `music_opl_module`).
+ *   - DG_music_module: forwarders to chocolate-doom's music_opl_module
+ *     (i_oplmusic.c + midifile.c overlay) backed by third_party/opl/opl_jade.c.
+ *     OPL3 samples are mixed into the SFX output buffer each Update().
  *
  * `D_GrabMouseCallback` is provided by chocolate-doom's d_main.c — do NOT
  * redefine it here.
@@ -18,8 +18,11 @@
 
 #include "doomgeneric.h"
 #include "doomkeys.h"
+#include "d_event.h"
 #include "i_sound.h"
 #include "w_wad.h"
+#include "opl.h"
+#include "opl_jade.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -40,8 +43,21 @@ extern void     jade_pcm_submit_stereo_i16(const int16_t* interleaved, uint32_t 
 extern uint32_t jade_pcm_queued_frames(void);
 extern uint32_t jade_pcm_sample_rate(void);
 
+/* i_oplmusic.c expects this global; chocolate-doom defines it inside
+ * i_sdlmusic.c which we don't compile. Driver-specific port base value is
+ * unused by opl_jade. */
+int opl_io_port = 0;
+
+/* i_sound.c references these via M_BindVariable when FEATURE_SOUND is defined.
+ * Upstream chocolate-doom defines them inside i_sdlsound.c (not compiled). */
+int   use_libsamplerate   = 0;
+float libsamplerate_scale = 0.65f;
+
+/* music_opl_module comes from chocolate-doom's i_oplmusic.c (overlay file). */
+extern music_module_t music_opl_module;
+
 /* -----------------------------------------------------------------------------
- * Keyboard + mouse: small lock-free queue filled by the C++ side, drained by
+ * Keyboard: small lock-free queue filled by the C++ side, drained by
  * doomgeneric via DG_GetKey on each tic.
  * ---------------------------------------------------------------------------*/
 
@@ -64,11 +80,31 @@ void jade_doom_feed_key(int pressed, unsigned char key)
     g_keyq_tail                 = next;
 }
 
+/* -----------------------------------------------------------------------------
+ * Mouse: relative motion + button state from the JS pointer-lock layer is
+ * posted as a single ev_mouse event into doomgeneric's queue.
+ *
+ * doom_port.cpp delivers up to one call per frame with the accumulated delta;
+ * buttons is a bitfield (bit 0 = left, bit 1 = right, bit 2 = middle).
+ * ---------------------------------------------------------------------------*/
+
+static unsigned int g_mouse_grab = 0u;
+
 JADE_KEEPALIVE
 void jade_doom_feed_mouse(int buttons, int dx, int dy)
 {
-    (void)buttons; (void)dx; (void)dy;
-    /* TODO: post relative mouse to i_input.c when mouse aim is wanted. */
+    /* Doom expects the host to grab the cursor before posting motion (so the
+     * MENU's "press F1 for the wadlist" prompt doesn't get clobbered). The
+     * C++ side gates this through D_GrabMouseCallback(); we mirror that here
+     * to drop motion when the game wouldn't want it. Buttons still pass
+     * through so DM clicks work in menus. */
+    event_t ev;
+    ev.type  = ev_mouse;
+    ev.data1 = buttons & 7;
+    ev.data2 = g_mouse_grab ? dx : 0;
+    ev.data3 = g_mouse_grab ? -dy : 0;  /* Doom Y is inverted: -dy is "forward". */
+    ev.data4 = 0;
+    D_PostEvent(&ev);
 }
 
 /* -----------------------------------------------------------------------------
@@ -79,6 +115,14 @@ void DG_Init(void) { }
 
 void DG_DrawFrame(void)
 {
+    /* Snapshot the menu/grab state once per frame: this is the same predicate
+     * chocolate-doom's i_video.c uses to decide whether to capture the mouse.
+     * It's also the predicate doom_port.cpp's wants_pointer_lock() returns to
+     * JS. */
+    extern boolean menuactive;
+    extern boolean paused;
+    g_mouse_grab = (!menuactive && !paused) ? 1u : 0u;
+
     jade_doom_present(DG_ScreenBuffer, DOOMGENERIC_RESX, DOOMGENERIC_RESY);
 }
 
@@ -118,7 +162,8 @@ void DG_SetWindowTitle(const char* title) { (void)title; }
  *
  * We linearly resample per-output-sample from src_rate to the Jade engine
  * rate (48 kHz), apply per-channel L/R volume, and accumulate into a
- * stereo int16 buffer that we submit to jade::audio's ring.
+ * stereo int16 buffer that we submit to jade::audio's ring. After SFX is
+ * packed, OPL3 music samples are additively mixed via OPL_Jade_Render_Add.
  * ---------------------------------------------------------------------------*/
 
 #define JADE_DOOM_NUM_CHANNELS 16
@@ -134,7 +179,7 @@ typedef struct {
     uint32_t       src_rate;
     uint64_t       pos_q32;      /* 32.32 fixed-point: integer hi = sample index */
     uint64_t       step_q32;     /* (src_rate << 32) / out_rate */
-    int32_t        vol_left;     /* 0..16384 */
+    int32_t        vol_left;     /* 0..(127*254) */
     int32_t        vol_right;
 } jade_chan_t;
 
@@ -142,13 +187,6 @@ static jade_chan_t g_chans[JADE_DOOM_NUM_CHANNELS];
 static int         g_sfx_inited = 0;
 static int         g_use_sfx_prefix = 1;
 static uint32_t    g_out_rate = 48000u;
-
-/* i_sound.c references these via M_BindVariable when FEATURE_SOUND is defined.
- * Upstream chocolate-doom defines them inside i_sdlsound.c, which we don't
- * compile. Provide defaults here; nothing in our pipeline reads them at run
- * time. */
-int   use_libsamplerate  = 0;
-float libsamplerate_scale = 0.65f;
 
 /* Per-update mix scratch (stereo int32 accumulator + int16 output buffer). */
 static int32_t  g_mix_buf[JADE_DOOM_MAX_MIX_FRAMES * 2];
@@ -200,8 +238,6 @@ static void jade_compute_pan(int vol, int sep, int32_t* l, int32_t* r)
     if (vol > 127) vol = 127;
     if (sep < 0)   sep = 0;
     if (sep > 254) sep = 254;
-    /* Pre-scale by 128 so a single int16 sample (after volume) fits in 24 bits;
-     * 16 channels summed still fits in int32 safely. */
     int32_t left  = (int32_t)vol * (254 - sep);
     int32_t right = (int32_t)vol * sep;
     *l = left;
@@ -220,6 +256,11 @@ static boolean jade_snd_init(boolean use_sfx_prefix)
     g_use_sfx_prefix = use_sfx_prefix ? 1 : 0;
     g_out_rate       = jade_pcm_sample_rate();
     if (g_out_rate < 8000u) g_out_rate = 48000u;
+
+    /* Force chocolate's snd_samplerate to match the Jade output rate so the
+     * OPL music backend renders into the same target rate as our mixer. */
+    snd_samplerate = (int)g_out_rate;
+
     for (int i = 0; i < JADE_DOOM_NUM_CHANNELS; ++i)
         jade_chan_clear(&g_chans[i]);
     g_sfx_inited = 1;
@@ -354,7 +395,6 @@ static void jade_snd_mix_and_submit(uint32_t frames)
             uint32_t idx = (uint32_t)(pos >> 32);
             if (idx >= end_q32_hi)
             {
-                /* Sound finished: release lump and clear channel. */
                 if (c->sfxinfo->lumpnum >= 0)
                     W_ReleaseLumpNum(c->sfxinfo->lumpnum);
                 jade_chan_clear(c);
@@ -365,11 +405,9 @@ static void jade_snd_mix_and_submit(uint32_t frames)
             int32_t s_u = (int32_t)c->data[idx];     /* 0..255 */
             int32_t s   = (s_u - 128) * 256;         /* -32768..+32512 */
 
-            /* vol_{left,right} is 0..(127*254). Sample * vol fits in int32. */
-            /* Scale: (s * vol) / (127 * 254) -> roughly normalized; we keep
-             * extra headroom by dividing by 32 (i.e. ~30 dB pre-mix) so up to
-             * 32 simultaneous loud samples don't clip the int16 output. */
-            int32_t pre_l = (s * lvol) >> 12; /* >> (12) gives a comfortable headroom */
+            /* Headroom: >> 12 lets ~32 simultaneous full-volume sounds mix
+             * without clipping, which is more than the 16-channel cap. */
+            int32_t pre_l = (s * lvol) >> 12;
             int32_t pre_r = (s * rvol) >> 12;
             g_mix_buf[f * 2u + 0u] += pre_l;
             g_mix_buf[f * 2u + 1u] += pre_r;
@@ -379,7 +417,7 @@ static void jade_snd_mix_and_submit(uint32_t frames)
         c->pos_q32 = pos;
     }
 
-    /* Clamp to int16 and pack. */
+    /* Clamp SFX to int16 and pack. */
     for (uint32_t i = 0; i < frames * 2u; ++i)
     {
         int32_t s = g_mix_buf[i];
@@ -387,6 +425,11 @@ static void jade_snd_mix_and_submit(uint32_t frames)
         if (s < -32768) s = -32768;
         g_out_buf[i] = (int16_t)s;
     }
+
+    /* Additively mix OPL3 music on top. OPL_Jade_Render_Add clamps internally,
+     * advances OPL callback time, and is safe even if no music is playing
+     * (returns silently when the callback queue is empty). */
+    OPL_Jade_Render_Add(g_out_buf, frames);
 
     jade_pcm_submit_stereo_i16(g_out_buf, frames);
 }
@@ -424,28 +467,44 @@ sound_module_t DG_sound_module = {
 };
 
 /* -----------------------------------------------------------------------------
- * Music backend: no-op stub.
+ * Music backend: forward to chocolate-doom's music_opl_module, defined in
+ * i_oplmusic.c (overlay file). i_oplmusic drives the OPL3 emulator via
+ * third_party/opl/opl_jade.c; samples are pulled into the SFX buffer above by
+ * OPL_Jade_Render_Add() during each Update() poll, so no separate music
+ * thread / callback is needed.
  *
- * Doom MIDI music needs an OPL emulator + a MUS/MIDI player. third_party/opl/
- * provides the Jade-flavored OPL3 backend (opl_jade.c); to enable music, add
- * chocolate-doom's i_oplmusic.c to doom_sources.list and forward the calls
- * below to its `music_opl_module`. The OPL renderer (OPL_Jade_Render_Add) can
- * then be invoked from jade_snd_mix_and_submit to mix music alongside SFX.
+ * Music modules don't get device-list filtering from i_sound.c (it always
+ * assigns DG_music_module unconditionally), so the device list is essentially
+ * cosmetic.
  * ---------------------------------------------------------------------------*/
 
-static snddevice_t jade_music_devices[] = { SNDDEVICE_NONE };
+static snddevice_t jade_music_devices[] = {
+    SNDDEVICE_SB, SNDDEVICE_PAS, SNDDEVICE_GENMIDI,
+    SNDDEVICE_GUS, SNDDEVICE_AWE32,
+};
 
-static boolean jade_mus_init(void) { return false; }
-static void    jade_mus_shutdown(void) { }
-static void    jade_mus_set_volume(int v) { (void)v; }
-static void    jade_mus_pause(void) { }
-static void    jade_mus_resume(void) { }
-static void*   jade_mus_register(void* data, int len) { (void)data; (void)len; return NULL; }
-static void    jade_mus_unregister(void* h) { (void)h; }
-static void    jade_mus_play(void* h, boolean loop) { (void)h; (void)loop; }
-static void    jade_mus_stop(void) { }
-static boolean jade_mus_playing(void) { return false; }
-static void    jade_mus_poll(void) { }
+static boolean jade_mus_init(void)
+{
+    /* Sample rate must be set before music_opl_module.Init() because that
+     * function calls OPL_SetSampleRate(snd_samplerate) internally. */
+    snd_samplerate = (int)jade_pcm_sample_rate();
+    if (snd_samplerate < 8000) snd_samplerate = 48000;
+    return music_opl_module.Init();
+}
+static void  jade_mus_shutdown(void)                  { music_opl_module.Shutdown(); }
+static void  jade_mus_set_volume(int v)               { music_opl_module.SetMusicVolume(v); }
+static void  jade_mus_pause(void)                     { music_opl_module.PauseMusic(); }
+static void  jade_mus_resume(void)                    { music_opl_module.ResumeMusic(); }
+static void* jade_mus_register(void* data, int len)   { return music_opl_module.RegisterSong(data, len); }
+static void  jade_mus_unregister(void* h)             { music_opl_module.UnRegisterSong(h); }
+static void  jade_mus_play(void* h, boolean loop)     { music_opl_module.PlaySong(h, loop); }
+static void  jade_mus_stop(void)                      { music_opl_module.StopSong(); }
+static boolean jade_mus_playing(void)                 { return music_opl_module.MusicIsPlaying(); }
+static void  jade_mus_poll(void)
+{
+    if (music_opl_module.Poll != NULL)
+        music_opl_module.Poll();
+}
 
 music_module_t DG_music_module = {
     jade_music_devices,
