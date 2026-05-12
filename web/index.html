@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JadeOS Portfolio</title>
+  <meta name="description" content="Interactive portfolio running a custom RISC CPU and software GPU." />
+  <meta property="og:title"       content="JadeOS Portfolio" />
+  <meta property="og:description" content="A custom portfolio OS running in your browser via WebAssembly." />
+  <meta property="og:type"        content="website" />
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      background: #04090f;
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+      color: #a0c8e8;
+    }
+
+    #boot-ui {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 28px; text-align: center;
+    }
+    #boot-ui h1 {
+      font-size: 2.2rem; letter-spacing: 0.4em;
+      color: #2a90cf; text-transform: uppercase;
+    }
+    #boot-ui .sub {
+      font-size: 0.72rem; color: #2d5a7a;
+      letter-spacing: 0.2em;
+    }
+    .field { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+    .field label {
+      font-size: 0.68rem; letter-spacing: 0.28em;
+      color: #2d5a7a; text-transform: uppercase;
+    }
+    select {
+      background: #071828; color: #80b8d8;
+      border: 1px solid #1a4a70;
+      padding: 8px 24px; font-family: inherit;
+      font-size: 0.88rem; cursor: pointer; outline: none;
+      min-width: 170px; text-align: center;
+    }
+    select:focus { border-color: #2a90cf; }
+    #boot-btn {
+      background: #071828; color: #2a90cf;
+      border: 1px solid #2a90cf;
+      padding: 11px 52px; font-family: inherit;
+      font-size: 0.9rem; letter-spacing: 0.3em;
+      cursor: pointer; text-transform: uppercase;
+      transition: background 0.12s;
+    }
+    #boot-btn:hover  { background: #0d2a42; }
+    #boot-btn:active { background: #091e30; }
+    .dots::after {
+      content: '';
+      animation: blink-dots 1.2s step-start infinite;
+    }
+    @keyframes blink-dots {
+      0%   { content: ''; }
+      25%  { content: '.'; }
+      50%  { content: '..'; }
+      75%  { content: '...'; }
+    }
+   
+    canvas {
+      display: none;
+      position: fixed; top: 0; left: 0;
+      cursor: default;
+    }
+    #fps {
+      display: none;
+      position: fixed; bottom: 8px; right: 12px;
+      font-size: 0.72rem; letter-spacing: 0.15em;
+      color: rgba(42,144,207,0.7);
+      pointer-events: none;
+      z-index: 9;
+    }
+  </style>
+</head>
+<body>
+  <div id="boot-ui">
+    <h1>JadeOS</h1>
+    <p class="sub">WebAssembly &nbsp;&middot;&nbsp; Custom RISC ISA &nbsp;&middot;&nbsp; Software GPU</p>
+    <div class="field">
+      <label>Emulated RAM</label>
+      <select id="mem-select">
+        <option value="16" selected>16 MiB (default)</option>
+        <option value="32">32 MiB</option>
+        <option value="64">64 MiB</option>
+        <option value="128">128 MiB</option>
+      </select>
+    </div>
+    <button id="boot-btn">Boot</button>
+  </div>
+
+  <canvas id="screen"></canvas>
+  <div id="fps"></div>
+
+  <script type="module">
+    import JadePortfolioModule from './jadeportfolio.js';
+    const mod = await JadePortfolioModule();
+
+    const SH_VP = /* wgsl */`
+struct Vp { size: vec2f }
+@group(0) @binding(0) var<uniform> vp: Vp;
+fn ndc(px: vec2f) -> vec4f {
+  return vec4f(px.x/vp.size.x*2.0-1.0, 1.0-px.y/vp.size.y*2.0, 0.0, 1.0);
+}
+const QUAD = array<vec2f,4>(vec2f(0,0),vec2f(1,0),vec2f(0,1),vec2f(1,1));
+struct Vc { @builtin(position) pos: vec4f, @location(0) col: vec4f }
+`;
+
+    // Rect: instanced quads. Instance = [x,y,w,h, r,g,b,a].
+    const SH_RECT = SH_VP + /* wgsl */`
+struct RI { @location(0) rect: vec4f, @location(1) col: vec4f }
+@vertex fn vs(@builtin(vertex_index) vi: u32, i: RI) -> Vc {
+  return Vc(ndc(i.rect.xy + QUAD[vi]*i.rect.zw), i.col);
+}
+@fragment fn fs(v: Vc) -> @location(0) vec4f { return v.col; }
+`;
+
+    // Line: instanced quads expanded from 2 endpoints. Instance = [x0,y0,x1,y1, r,g,b,a].
+    const SH_LINE = SH_VP + /* wgsl */`
+struct LI { @location(0) p0: vec2f, @location(1) p1: vec2f, @location(2) col: vec4f }
+@vertex fn vs(@builtin(vertex_index) vi: u32, i: LI) -> Vc {
+  let d = i.p1 - i.p0;
+  let ln = length(d);
+  let dir = select(vec2f(1,0), d/ln, ln > 0.0001);
+  let n = vec2f(-dir.y, dir.x) * 1.0;
+  let pts = array<vec2f,4>(i.p0+n, i.p0-n, i.p1+n, i.p1-n);
+  return Vc(ndc(pts[vi]), i.col);
+}
+@fragment fn fs(v: Vc) -> @location(0) vec4f { return v.col; }
+`;
+
+    // Circle: instanced quads with SDF discard. Instance = [cx,cy,r,inner_r, r,g,b,a].
+    const SH_CIRC = SH_VP + /* wgsl */`
+struct CI { @location(0) cp: vec2f, @location(1) rad: vec2f, @location(2) col: vec4f }
+struct CVo { @builtin(position) pos: vec4f, @location(0) col: vec4f,
+             @location(1) uv: vec2f, @location(2) rad: vec2f }
+@vertex fn vs(@builtin(vertex_index) vi: u32, i: CI) -> CVo {
+  let q = QUAD[vi]*2.0-1.0;
+  return CVo(ndc(i.cp + q*i.rad.x), i.col, q, i.rad);
+}
+@fragment fn fs(v: CVo) -> @location(0) vec4f {
+  let d = length(v.uv);
+  if d > 1.0 { discard; }
+  if v.rad.y > 0.0 && d < v.rad.y/v.rad.x { discard; }
+  return v.col;
+}
+`;
+
+    // Text: instanced textured quads sampling a greyscale atlas.
+    // Instance = [sx0,sy0,sx1,sy1, u0,v0,u1,v1, r,g,b,a].
+    const SH_TEXT = SH_VP + /* wgsl */`
+@group(0) @binding(1) var atlasTex: texture_2d<f32>;
+@group(0) @binding(2) var atlasSmp: sampler;
+struct GI { @location(0) sr: vec4f, @location(1) uv: vec4f, @location(2) col: vec4f }
+struct GVo { @builtin(position) pos: vec4f,
+             @location(0) uv: vec2f, @location(1) col: vec4f }
+@vertex fn vs(@builtin(vertex_index) vi: u32, i: GI) -> GVo {
+  let q = QUAD[vi];
+  return GVo(ndc(mix(i.sr.xy,i.sr.zw,q)), mix(i.uv.xy,i.uv.zw,q), i.col);
+}
+@fragment fn fs(v: GVo) -> @location(0) vec4f {
+  let a = textureSample(atlasTex, atlasSmp, v.uv).r;
+  return vec4f(v.col.rgb, v.col.a * a);
+}
+`;
+
+    const ALPHA_BLEND = {
+      color:{ srcFactor:'src-alpha', dstFactor:'one-minus-src-alpha', operation:'add' },
+      alpha:{ srcFactor:'one',       dstFactor:'one-minus-src-alpha', operation:'add' },
+    };
+
+    function mkPipe(device, format, wgsl, bufLayouts, bgl, blend) {
+      const mod = device.createShaderModule({ code: wgsl });
+      return device.createRenderPipeline({
+        layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+        vertex:   { module: mod, entryPoint: 'vs', buffers: bufLayouts },
+        fragment: { module: mod, entryPoint: 'fs',
+                    targets: [{ format, blend: blend || undefined }] },
+        primitive:{ topology: 'triangle-strip' },
+      });
+    }
+
+    const RECT_BUF   = [{ arrayStride:32, stepMode:'instance', attributes:[
+      {shaderLocation:0,offset:0, format:'float32x4'},
+      {shaderLocation:1,offset:16,format:'float32x4'} ]}];
+    const LINE_BUF   = [{ arrayStride:32, stepMode:'instance', attributes:[
+      {shaderLocation:0,offset:0, format:'float32x2'},
+      {shaderLocation:1,offset:8, format:'float32x2'},
+      {shaderLocation:2,offset:16,format:'float32x4'} ]}];
+    const CIRCLE_BUF = LINE_BUF;   // same layout: 2+2+4 floats
+    const GLYPH_BUF  = [{ arrayStride:48, stepMode:'instance', attributes:[
+      {shaderLocation:0,offset:0, format:'float32x4'},
+      {shaderLocation:1,offset:16,format:'float32x4'},
+      {shaderLocation:2,offset:32,format:'float32x4'} ]}];
+
+    (() => {
+      const saved = localStorage.getItem('jadeos_ram_mib');
+      if (saved) {
+        const sel = document.getElementById('mem-select');
+        if (sel) sel.value = saved;
+      }
+    })();
+
+    document.getElementById('boot-btn').addEventListener('click', async () => {
+      const memMib = parseInt(document.getElementById('mem-select').value, 10);
+      // Persist RAM selection.
+      localStorage.setItem('jadeos_ram_mib', String(memMib));
+      const dpr    = window.devicePixelRatio || 1;
+      let fbW = Math.round(window.innerWidth  * dpr);
+      let fbH = Math.round(window.innerHeight * dpr);
+
+      const canvas = document.getElementById('screen');
+      canvas.width  = fbW;  canvas.height = fbH;
+      canvas.style.width  = window.innerWidth  + 'px';
+      canvas.style.height = window.innerHeight + 'px';
+
+      const ui  = document.getElementById('boot-ui');
+      const btn = document.getElementById('boot-btn');
+      btn.textContent = 'Loading';  btn.classList.add('dots');  btn.disabled = true;
+
+      let gpuDevice = null, gpuCtx = null, gpuFmt = null;
+      let ctx2d = null, imgData = null;
+      const useWebGPU = !!navigator.gpu;
+
+      if (useWebGPU) {
+        try {
+          const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+          if (adapter) {
+            gpuDevice = await adapter.requestDevice();
+            gpuFmt    = navigator.gpu.getPreferredCanvasFormat();
+            gpuCtx    = canvas.getContext('webgpu');
+            gpuCtx.configure({ device: gpuDevice, format: gpuFmt, alphaMode: 'opaque' });
+          }
+        } catch(e) { console.warn('WebGPU init failed, falling back to 2D:', e); gpuDevice = null; }
+      }
+      if (!gpuDevice) {
+        ctx2d    = canvas.getContext('2d');
+        imgData  = ctx2d.createImageData(fbW, fbH);
+      }
+
+      try {
+        const resp = await fetch('./Monaco.ttf');
+        if (resp.ok) {
+          const buf   = await resp.arrayBuffer();
+          const bytes = new Uint8Array(buf);
+          const ptr   = mod.allocFontBuffer(bytes.length);
+          mod.HEAPU8.set(bytes, ptr);
+          mod.commitFontBuffer(dpr);
+        } else {
+          console.warn('Monaco.ttf fetch failed:', resp.status);
+        }
+      } catch(e) { console.warn('Font load error:', e); }
+
+      if (gpuDevice) mod.setWebGpuMode(true);
+      mod.boot(memMib, fbW, fbH, dpr);
+
+      let pipes = null, bglBase = null, bglText = null, bgBase = null;
+      let atlasTex = [], atlasInfo = [];
+      let vpBuf = null;
+      // Persistent instance staging buffer (4 MiB, grown on demand).
+      let instBuf = null, instBufSize = 0;
+
+      if (gpuDevice) {
+        bglBase = gpuDevice.createBindGroupLayout({ entries:[
+          {binding:0,visibility:GPUShaderStage.VERTEX,buffer:{type:'uniform'}}
+        ]});
+        bglText = gpuDevice.createBindGroupLayout({ entries:[
+          {binding:0,visibility:GPUShaderStage.VERTEX,   buffer:{type:'uniform'}},
+          {binding:1,visibility:GPUShaderStage.FRAGMENT, texture:{sampleType:'float'}},
+          {binding:2,visibility:GPUShaderStage.FRAGMENT, sampler:{type:'filtering'}},
+        ]});
+
+        pipes = {
+          rect:  mkPipe(gpuDevice,gpuFmt,SH_RECT,  RECT_BUF,  bglBase, null),
+          recta: mkPipe(gpuDevice,gpuFmt,SH_RECT,  RECT_BUF,  bglBase, ALPHA_BLEND),
+          line:  mkPipe(gpuDevice,gpuFmt,SH_LINE,  LINE_BUF,  bglBase, ALPHA_BLEND),
+          circ:  mkPipe(gpuDevice,gpuFmt,SH_CIRC,  CIRCLE_BUF,bglBase, ALPHA_BLEND),
+          text:  mkPipe(gpuDevice,gpuFmt,SH_TEXT,  GLYPH_BUF, bglText, ALPHA_BLEND),
+        };
+
+        vpBuf = gpuDevice.createBuffer({ size:8, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
+        gpuDevice.queue.writeBuffer(vpBuf, 0, new Float32Array([fbW, fbH]));
+
+        bgBase = gpuDevice.createBindGroup({ layout:bglBase,
+          entries:[{binding:0,resource:{buffer:vpBuf}}] });
+
+        const atlSampler = gpuDevice.createSampler({ minFilter:'linear', magFilter:'linear' });
+
+        // Upload all 3 font atlas sizes as R8Unorm textures.
+        for (let sid = 0; sid < 3; sid++) {
+          const info = mod.getAtlasInfo(sid);
+          atlasInfo[sid] = info;
+          if (!info.loaded || !info.width) continue;
+          const bmp = mod.getAtlasBitmap(sid);
+          if (!bmp) continue;
+
+          const tex = gpuDevice.createTexture({
+            size:[info.width, info.height],
+            format:'r8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+          });
+          gpuDevice.queue.writeTexture(
+            {texture: tex},
+            bmp,
+            {bytesPerRow: info.width, rowsPerImage: info.height},
+            [info.width, info.height],
+          );
+          atlasTex[sid] = tex;
+          atlasTex[sid].bg = gpuDevice.createBindGroup({ layout:bglText, entries:[
+            {binding:0, resource:{buffer:vpBuf}},
+            {binding:1, resource:tex.createView()},
+            {binding:2, resource:atlSampler},
+          ]});
+        }
+
+        const _ripBuf = new ArrayBuffer(4);
+        const _ripF32 = new Float32Array(_ripBuf);
+        const _ripU32 = new Uint32Array(_ripBuf);
+        // bullshit JS has no float<->uint bitcast, so we do it manually via a shared ArrayBuffer
+        function f2f(bits) { _ripU32[0]=bits; return _ripF32[0]; }
+
+        function ensureInstBuf(needBytes) {
+          const maxBuf = gpuDevice.limits.maxBufferSize ?? 268435456;
+          const aligned = Math.min(
+            Math.ceil(Math.max(needBytes, 1) / 256) * 256,
+            maxBuf
+          );
+          if (aligned > instBufSize) {
+            instBuf?.destroy();
+            instBufSize = Math.min(
+              Math.max(aligned * 2, 4 * 1024 * 1024),
+              maxBuf
+            );
+            instBuf = gpuDevice.createBuffer({
+              size: instBufSize,
+              usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+            });
+          }
+        }
+
+        // WASM pisses out glyph metrics as a flat array of floats, so we convert it to an array of Float32Arrays for easier indexing in the render loop.
+        const glyphM = atlasInfo.map(info => {
+          if (!info?.glyphMetrics) return null;
+          const m = new Float32Array(info.glyphMetrics.length);
+          m.set(info.glyphMetrics);
+          return { m, w: info.width, h: info.height };
+        });
+
+        // Indexed by type: 0=rect 1=recta 2=line 3=circ 4=text
+        const FP_ARR   = [8,8,8,8,12];
+        const TYPE_IDS = ['rect','recta','line','circ','text'];
+        const MAX_BATCHES = 512;
+        // Each batch: [ti, sid, sx, sy, sw, sh, f32Start, f32Count]
+        const batchBuf  = new Int32Array(MAX_BATCHES * 8);
+        let stagingF32  = new Float32Array(256 * 1024); // 1 MiB initial
+        const dec       = new TextDecoder();
+
+        // guys guys, i can name my variables whatever i want, it's my code and my website, and i choose to name them like this, so please stop asking questions about it, thank you very much
+        // on another note: this does feel a bit like writing assembly, huh? you have to manage your own batches and buffers and state tracking and everything, it's wild that we have this level of control in JS now. anyway, enjoy the code golf!
+        let _nB=0,_nF=0,_cT=-1,_cS=0,_cSx=0,_cSy=0,_cSw=0,_cSh=0;
+        let _sx=0,_sy=0,_sw=0,_sh=0;
+
+        function _closeBatch(){
+          if(_nB>0) batchBuf[(_nB-1)*8+7]=_nF-batchBuf[(_nB-1)*8+6];
+        }
+
+        // yeah just dont ask questions about this, it's a state machine for batching draw calls based on texture+scissor state. it is what it is, enjoy the madness
+        function _openBatch(ti,sid){
+          if(_nB>=MAX_BATCHES) return;
+          const bb=_nB++*8;
+          batchBuf[bb]=ti; batchBuf[bb+1]=sid;
+          batchBuf[bb+2]=_sx; batchBuf[bb+3]=_sy; batchBuf[bb+4]=_sw; batchBuf[bb+5]=_sh;
+          batchBuf[bb+6]=_nF; batchBuf[bb+7]=0;
+          _cT=ti; _cS=sid; _cSx=_sx; _cSy=_sy; _cSw=_sw; _cSh=_sh;
+        }
+        function _eb(ti,sid){
+          if(_cT!==ti||_cS!==sid||_sx!==_cSx||_sy!==_cSy||_sw!==_cSw||_sh!==_cSh){
+            _closeBatch(); _openBatch(ti,sid);
+          }
+        }
+
+        window._webgpuRender = function() {
+          const cmds = mod.getCmdBuf();
+          const pool = mod.getStrPool();
+          if (!cmds) return;
+          const n = cmds.length >>> 3;
+
+          // Find CLEAR color for render-pass clearValue.
+          let cr=0.02,cg=0.035,cb=0.063,ca=1;
+          for (let i=0;i<n;i++) {
+            if ((cmds[i<<3]&0xFF)===0x01){
+              const c=cmds[(i<<3)+5];
+              cr=((c>>16)&255)/255; cg=((c>>8)&255)/255; cb=(c&255)/255; ca=((c>>24)&255)/255;
+              break;
+            }
+          }
+
+          // Reset batch state.
+          _nB=0; _nF=0; _cT=-1; _cS=0;
+          _cSx=0; _cSy=0; _cSw=fbW; _cSh=fbH;
+          _sx=0;  _sy=0;  _sw=fbW;  _sh=fbH;
+
+          let textFloatBudget = 0;
+          for (let pi = 0; pi < n; pi++) {
+            const t = cmds[pi << 3] & 0xff;
+            if (t === 0x80) textFloatBudget += ((cmds[pi << 3] >> 16) & 0xffff) * 12;
+          }
+          const needF = n * 12 + textFloatBudget + 4096;
+          if (needF > stagingF32.length) {
+            stagingF32 = new Float32Array(
+              Math.max(needF + 65536, (stagingF32.length || 1) * 2)
+            );
+          }
+          let sf = stagingF32;
+
+          // this loop is... not pretty. it's basically a big state machine that tries to batch draw calls together based on texture+scissor state, which is determined by the command stream. it also expands text commands into per-glyph quads, which is why text commands have more instance data than the others. anyway, it works, and it's pretty fast, so enjoy the madness!
+          for(let i=0;i<n;i++){
+            const b=i<<3;
+            const tf=cmds[b], type=tf&0xFF, sid=(tf>>8)&0xFF, slen=(tf>>16)&0xFFFF;
+            const x0=f2f(cmds[b+1]),y0=f2f(cmds[b+2]);
+            const x1=f2f(cmds[b+3]),y1=f2f(cmds[b+4]);
+            const col=cmds[b+5];
+            const r=((col>>16)&255)/255, g=((col>>8)&255)/255,
+                  bv=(col&255)/255,      a=((col>>24)&255)/255;
+
+            switch(type){
+            case 0x01: break;
+            case 0x04: _eb(0,0);
+              sf[_nF++]=x0;sf[_nF++]=y0;sf[_nF++]=x1;sf[_nF++]=y1;
+              sf[_nF++]=r; sf[_nF++]=g; sf[_nF++]=bv;sf[_nF++]=a; break;
+            case 0x07: _eb(1,0);
+              sf[_nF++]=x0;sf[_nF++]=y0;sf[_nF++]=x1;sf[_nF++]=y1;
+              sf[_nF++]=r; sf[_nF++]=g; sf[_nF++]=bv;sf[_nF++]=a; break;
+            case 0x03: case 0x09: _eb(2,0);
+              sf[_nF++]=x0;sf[_nF++]=y0;sf[_nF++]=x1;sf[_nF++]=y1;
+              sf[_nF++]=r; sf[_nF++]=g; sf[_nF++]=bv;sf[_nF++]=a; break;
+            case 0x08: _eb(3,0);
+              sf[_nF++]=x0;sf[_nF++]=y0;sf[_nF++]=x1;sf[_nF++]=y1;
+              sf[_nF++]=r; sf[_nF++]=g; sf[_nF++]=bv;sf[_nF++]=a; break;
+            case 0x80: { // TEXT
+              const soff=cmds[b+6];
+              if(!pool||!glyphM[sid]) break;
+              _eb(4,sid);
+              const text=dec.decode(pool.subarray(soff,soff+slen));
+              if (_nF + text.length * 14 > sf.length) {
+                const nl = Math.max(sf.length * 2, _nF + text.length * 14 + 65536);
+                const ns = new Float32Array(nl);
+                ns.set(sf);
+                stagingF32 = ns;
+                sf = stagingF32;
+              }
+              const gm=glyphM[sid]; const m=gm.m;
+              let px=x0;
+              for(let ci=0;ci<text.length;ci++){
+                const idx=text.charCodeAt(ci)-0x20;
+                if(idx<0||idx>=96){px+=8;continue;}
+                const j=idx*9;
+                const gx0=px+m[j],gy0=y0+m[j+1],gx1=px+m[j+2],gy1=y0+m[j+3];
+                if(gx1>gx0&&gy1>gy0){
+                  sf[_nF++]=gx0; sf[_nF++]=gy0; sf[_nF++]=gx1; sf[_nF++]=gy1;
+                  sf[_nF++]=m[j+5]/gm.w; sf[_nF++]=m[j+6]/gm.h;
+                  sf[_nF++]=m[j+7]/gm.w; sf[_nF++]=m[j+8]/gm.h;
+                  sf[_nF++]=r; sf[_nF++]=g; sf[_nF++]=bv; sf[_nF++]=a;
+                }
+                px+=m[j+4];
+              }
+              break;
+            }
+            case 0x0A:{
+              _closeBatch(); _cT=-1;
+              _sx=Math.max(0,Math.round(x0)); _sy=Math.max(0,Math.round(y0));
+              _sw=Math.max(1,Math.min(Math.round(x1)-_sx,fbW-_sx));
+              _sh=Math.max(1,Math.min(Math.round(y1)-_sy,fbH-_sy));
+              break;
+            }
+            case 0x0B: _closeBatch(); _cT=-1; _sx=0;_sy=0;_sw=fbW;_sh=fbH; break;
+            case 0xFF: break;
+            }
+          }
+          _closeBatch();
+
+          const instBytes = _nF * 4;
+          ensureInstBuf(Math.max(instBytes, 256));
+          if (_nF > 0 && instBuf) {
+            const cap = Number(instBuf.size);
+            let wb = Math.min(instBytes, sf.byteLength, cap);
+            wb = wb & ~3;
+            if (wb > 0) {
+              const CHUNK = 256 * 1024;
+              for (let off = 0; off < wb; ) {
+                let slice = Math.min(CHUNK, wb - off);
+                slice -= slice % 4;
+                if (slice <= 0) break;
+                gpuDevice.queue.writeBuffer(instBuf, off, sf, off, slice);
+                off += slice;
+              }
+            }
+          }
+
+          const enc=gpuDevice.createCommandEncoder();
+          const pass=enc.beginRenderPass({
+            colorAttachments:[{
+              view:gpuCtx.getCurrentTexture().createView(),
+              loadOp:'clear', clearValue:{r:cr,g:cg,b:cb,a:ca}, storeOp:'store',
+            }]
+          });
+          pass.setViewport(0,0,fbW,fbH,0,1);
+
+          // Again, this loop is a state machine that tries to minimize pipeline and bind group changes by batching draw calls with the same texture+scissor together. It also sets scissor rects as needed when batches change.
+          let lsx=-1,lsy=-1,lsw=-1,lsh=-1;
+          for(let bi=0;bi<_nB;bi++){
+            const bb=bi*8;
+            const ti=batchBuf[bb],   sid=batchBuf[bb+1];
+            const sx=batchBuf[bb+2], sy=batchBuf[bb+3];
+            const sw=batchBuf[bb+4], sh=batchBuf[bb+5];
+            const f0=batchBuf[bb+6], fc=batchBuf[bb+7];
+            if(sw<=0||sh<=0||fc<=0) continue;
+            const cnt=(fc/FP_ARR[ti])|0;
+            if(cnt<1) continue;
+            if(sx!==lsx||sy!==lsy||sw!==lsw||sh!==lsh){
+              pass.setScissorRect(sx,sy,sw,sh); lsx=sx;lsy=sy;lsw=sw;lsh=sh;
+            }
+            pass.setPipeline(pipes[TYPE_IDS[ti]]);
+            pass.setBindGroup(0, ti===4 ? (atlasTex[sid]?.bg||bgBase) : bgBase);
+            pass.setVertexBuffer(0,instBuf,f0*4,fc*4);
+            pass.draw(4,cnt);
+          }
+
+          pass.end();
+          gpuDevice.queue.submit([enc.finish()]);
+        };
+      } // end WebGPU setup
+
+      ui.style.display = 'none';
+      canvas.style.display = 'block';
+      canvas.focus();
+
+      function toFb(e) {
+        const rect=canvas.getBoundingClientRect();
+        return {
+          x: Math.max(0,Math.floor((e.clientX-rect.left)*fbW/rect.width)),
+          y: Math.max(0,Math.floor((e.clientY-rect.top) *fbH/rect.height)),
+        };
+      }
+
+      canvas.addEventListener('mousedown',e=>{ if(!mod.isRunning())return; e.preventDefault();
+        const{x,y}=toFb(e); mod.sendMouseDown(x>>>0,y>>>0); canvas.focus(); });
+      document.addEventListener('mousemove',e=>{ if(!mod.isRunning())return;
+        const{x,y}=toFb(e); mod.sendMouseMove(x>>>0,y>>>0); });
+      document.addEventListener('mouseup',()=>{ if(mod.isRunning()) mod.sendMouseUp(); });
+      canvas.addEventListener('wheel',e=>{ if(!mod.isRunning())return; e.preventDefault();
+        mod.sendScroll(e.deltaY>0?1:-1); },{passive:false});
+      document.addEventListener('keydown',e=>{
+        if(!mod.isRunning())return;
+        const ch=e.key.length===1?e.key.charCodeAt(0):0;
+        // Pack modifier bits into high half: bit16=Shift bit17=Ctrl bit18=Alt bit19=Meta
+        const mods=((e.shiftKey?1:0))|((e.ctrlKey?1:0)<<1)|((e.altKey?1:0)<<2)|((e.metaKey?1:0)<<3);
+        const k=((e.keyCode&0xFFFF)|(mods<<16))>>>0;
+        mod.sendKey(k,ch>>>0);
+        // Prevent default for navigation + our WM hotkeys
+        if([8,9,13,32,37,38,39,40,46].includes(e.keyCode)) e.preventDefault();
+        if(e.altKey&&['q','Q',' ','Enter','Tab'].includes(e.key)) e.preventDefault();
+      });
+
+      // Resize handler
+      // whats code golf?
+      window.addEventListener('resize',()=>{
+        if(!mod.isRunning())return;
+        const nd=window.devicePixelRatio||1;
+        const nw=Math.round(window.innerWidth*nd),nh=Math.round(window.innerHeight*nd);
+        if(nw===fbW&&nh===fbH)return;
+        fbW=nw; fbH=nh;
+        canvas.width=fbW; canvas.height=fbH;
+        canvas.style.width=window.innerWidth+'px'; canvas.style.height=window.innerHeight+'px';
+        mod.resize(fbW,fbH);
+        if(gpuDevice){
+          gpuCtx.configure({device:gpuDevice,format:gpuFmt,alphaMode:'opaque'});
+          gpuDevice.queue.writeBuffer(vpBuf,0,new Float32Array([fbW,fbH]));
+        } else {
+          imgData=ctx2d.createImageData(fbW,fbH);
+        }
+      });
+
+      const CPU_CYCLES = 5000;
+      const SIM_DT_MS  = 1000 / 120;   // C++ spring physics expects 120 Hz fixed step
+      const MAX_SIM_DT = SIM_DT_MS * 2;
+      let accumulator  = SIM_DT_MS;
+      let lastSimTime  = performance.now() - SIM_DT_MS;
+      let lastUnix = 0;
+
+      // thats some high fps
+      const fpsEl = document.getElementById('fps');
+      fpsEl.style.display = 'block';
+      let fpsFrames=0, fpsLastTime=performance.now();
+
+      function frame(now){
+        // FPS
+        fpsFrames++;
+        if(now-fpsLastTime>=1000){
+          fpsEl.textContent=`${fpsFrames} FPS`;
+          fpsFrames=0; fpsLastTime=now;
+        }
+
+        const unix = (Date.now() / 1000) >>> 0;
+        if (unix !== lastUnix) {
+          mod.setWallClock(unix);
+          lastUnix = unix;
+        }
+
+        // Fixed-step sim: clamp delta so a stall never queues >2 ticks.
+        // At 60 Hz display: ~2 ticks per frame -> full 120 Hz spring physics.
+        // At 120 Hz display: ~1 tick per frame -> same.
+        accumulator += Math.min(now - lastSimTime, MAX_SIM_DT);
+        lastSimTime = now;
+        while(accumulator >= SIM_DT_MS){
+          if(mod.isRunning()) mod.tick(CPU_CYCLES);
+          accumulator -= SIM_DT_MS;
+        }
+
+        // Render it!
+        if(gpuDevice){
+          window._webgpuRender();
+        } else {
+          const fb=mod.getFramebuffer();
+          imgData.data.set(new Uint8ClampedArray(fb.buffer,fb.byteOffset,fb.byteLength));
+          ctx2d.putImageData(imgData,0,0);
+        }
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    });
+  </script>
+</body>
+</html>

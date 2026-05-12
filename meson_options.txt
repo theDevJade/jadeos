@@ -1,0 +1,11 @@
+option('enable_debug_overlay', type : 'boolean', value : true,
+  description : 'Render an on-screen debug overlay showing CPU/GPU registers')
+
+option('cpu_clock_hz', type : 'integer', value : 1000000,
+  description : 'Emulated CPU clock speed in Hz (default 1 MHz)')
+
+option('framebuffer_width', type : 'integer', value : 640,
+  description : 'Emulated GPU framebuffer width in pixels')
+
+option('framebuffer_height', type : 'integer', value : 480,
+  description : 'Emulated GPU framebuffer height in pixels')

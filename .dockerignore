@@ -1,0 +1,11 @@
+build*/
+.git
+.cursor
+.idea
+.vscode
+**/*.o
+**/*.a
+.DS_Store
+*.log
+.env
+.env.*

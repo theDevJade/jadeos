@@ -1,0 +1,37 @@
+# Meson / Ninja outputs
+build*/
+
+# Meson wraps (keep .wrap files; ignore extracted deps)
+/subprojects/*
+!/subprojects/*.wrap
+
+# Compiled objects / libs (if ever built in-tree)
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+.Python
+*.egg-info/
+.venv/
+venv/
+
+# Logs / cores
+*.log
+core
+vgcore.*
+
+# Local env (secrets, machine-specific)
+.env
+.env.*
