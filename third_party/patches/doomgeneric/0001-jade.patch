@@ -1,0 +1,16 @@
+diff --git a/doomgeneric/i_sound.c b/doomgeneric/i_sound.c
+index c80a9d1..1a714a8 100644
+--- a/doomgeneric/i_sound.c
++++ b/doomgeneric/i_sound.c
+@@ -18,7 +18,10 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ 
+-#if defined(FEATURE_SOUND) && !defined(__DJGPP__)
++/* Jade WASM: chocolate-doom's SDL_mixer header is unused in this TU; skip it
++ * on emscripten where the SDL port requires `-sUSE_SDL`. The DG_sound_module
++ * and DG_music_module references below are satisfied by doomgeneric_jade.c. */
++#if defined(FEATURE_SOUND) && !defined(__DJGPP__) && !defined(__EMSCRIPTEN__)
+ #include <SDL_mixer.h>
+ #endif
+ 

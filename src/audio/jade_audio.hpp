@@ -22,3 +22,8 @@ void submit_stereo_i16(const std::int16_t* interleaved, std::uint32_t frames) no
 [[nodiscard]] std::uint32_t queued_stereo_frames() noexcept;
 
 }  // namespace jade::audio
+
+extern "C" void          jade_pcm_submit_stereo_i16(const std::int16_t* interleaved,
+                                                    std::uint32_t frames) noexcept;
+extern "C" std::uint32_t jade_pcm_queued_frames(void) noexcept;
+extern "C" std::uint32_t jade_pcm_sample_rate(void) noexcept;

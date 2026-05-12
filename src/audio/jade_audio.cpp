@@ -23,6 +23,16 @@ extern "C" void jade_pcm_submit_stereo_i16(const std::int16_t* interleaved,
     jade::audio::submit_stereo_i16(interleaved, frames);
 }
 
+extern "C" std::uint32_t jade_pcm_queued_frames(void) noexcept
+{
+    return jade::audio::queued_stereo_frames();
+}
+
+extern "C" std::uint32_t jade_pcm_sample_rate(void) noexcept
+{
+    return jade::audio::sample_rate();
+}
+
 namespace jade::audio {
 
 void init(std::uint32_t sample_rate_hz, std::size_t ring_seconds)

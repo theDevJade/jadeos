@@ -1,5 +1,4 @@
 # syntax=docker/dockerfile:1
-# Static WASM site: nginx on 5883. Put TLS in front (for example Traefik).
 
 FROM emscripten/emsdk:4.0.23 AS build
 
@@ -18,7 +17,6 @@ RUN apt-get update \
 WORKDIR /src
 COPY . .
 
-# Network: downloads stb_image.h. Populate third_party/ (git submodules) before build; see README.
 RUN chmod +x scripts/vendor-third-party.sh \
     && ./scripts/vendor-third-party.sh
 

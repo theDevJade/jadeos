@@ -1,0 +1,7 @@
+# third_party submodule pins (path<TAB>url<TAB>sha).
+# Used by scripts/vendor-third-party.sh when .git is absent (e.g. Docker build context).
+# Keep in sync with .gitmodules + the parent repo's gitlinks.
+third_party/doomgeneric	https://github.com/ozkl/doomgeneric.git	dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+third_party/arduino-libhelix	https://github.com/pschatzmann/arduino-libhelix.git	6498639d833bebbe14266f760f47849434fde7d2
+third_party/h264bsd	https://github.com/oneam/h264bsd.git	42bcb5d753ad86d84903354bf3c68423c28adb7b
+third_party/minimp4	https://github.com/lieff/minimp4.git	4575afb4f69ace25a1a048e25cc86bf8c8d14f2b
