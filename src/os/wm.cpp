@@ -14,6 +14,57 @@ static constexpr uint32_t CLR_MIN_BTN      = 0xFF'CC'A0'20;
 static constexpr uint32_t CLR_MAX_BTN      = 0xFF'30'A0'40;
 static constexpr uint32_t CLR_BG_WIN       = 0xFF'06'0E'1A;
 
+// ALT+TAB launcher: Spotlight-style centered card (layout shared by draw + hit-test).
+struct LauncherLayout {
+    int px = 0;
+    int py = 0;
+    int pw = 0;
+    int ph = 0;
+    int pad = 0;
+    int header_h = 0;
+    int row_h = 0;
+    int list_y = 0;
+    int footer_h = 0;
+};
+
+static LauncherLayout compute_launcher_layout(int W, int H, float dpr, int n) noexcept {
+    LauncherLayout L;
+    auto sc = [dpr](int v) { return static_cast<int>(v * dpr + 0.5f); };
+    L.pad       = sc(14);
+    L.header_h  = sc(48);
+    L.footer_h  = sc(30);
+    const int side_m = sc(24);
+    L.pw        = (std::max)(sc(280), (std::min)(W - side_m * 2, sc(420)));
+    const int row_ideal = sc(50);
+    const int max_ph    = (std::max)(sc(160), H - sc(40));
+    const int base      = L.pad + L.header_h + L.footer_h + L.pad;
+    L.row_h = row_ideal;
+    if (n > 0 && base + n * L.row_h > max_ph)
+        L.row_h = (std::max)(sc(34), (max_ph - base) / n);
+    L.ph = base + n * L.row_h;
+    L.px = (W - L.pw) / 2;
+    L.py = (std::max)(sc(24), (H - L.ph) / 3);
+    L.list_y = L.py + L.pad + L.header_h;
+    return L;
+}
+
+static std::string ellipsize_to_width(const gpu::FontAtlas& f, const std::string& s,
+                                      float max_w) {
+    if (s.empty() || f.measure_width(s.c_str()) <= max_w)
+        return s;
+    static const char ell[] = "...";
+    const float ell_w = f.measure_width(ell);
+    if (ell_w > max_w)
+        return "";
+    std::string t = s;
+    while (t.size() > 1) {
+        t.pop_back();
+        if (f.measure_width(t.c_str()) + ell_w <= max_w)
+            return t + ell;
+    }
+    return t + ell;
+}
+
 void WindowManager::g_rect(int x, int y, int w, int h, uint32_t col) {
     gpu::CmdPacket p;
     p.cmd     = gpu::Command::DRAW_RECT;
@@ -254,6 +305,13 @@ Window* WindowManager::find(int id) {
     return nullptr;
 }
 
+bool WindowManager::window_shown(int id) const noexcept {
+    for (const auto& w : windows_)
+        if (w.id == id)
+            return w.visible && !w.minimized && !w.closing;
+    return false;
+}
+
 void WindowManager::focus(int id) {
     for (auto& w : windows_) w.focused = (w.id == id);
     focused_id_ = id;
@@ -312,6 +370,17 @@ ResizeEdge WindowManager::hit_edge(const Window& w, int x, int y) const noexcept
 
 void WindowManager::mouse_down(int x, int y) {
     if (launcher_open_) {
+        const std::vector<std::size_t> fidx = launcher_filtered_indices();
+        const int n = static_cast<int>(fidx.size());
+        const LauncherLayout L =
+            compute_launcher_layout(screen_w_, screen_h_, dpr_, (std::max)(n, 1));
+        const bool on_panel =
+            x >= L.px && x < L.px + L.pw && y >= L.py && y < L.py + L.ph;
+        if (on_panel && y >= L.list_y && y < L.list_y + n * L.row_h && n > 0) {
+            const int idx = (y - L.list_y) / L.row_h;
+            if (idx >= 0 && idx < n)
+                reopen_window(windows_[fidx[static_cast<std::size_t>(idx)]].id);
+        }
         launcher_open_ = false;
         return;
     }
@@ -551,79 +620,192 @@ void WindowManager::toggle_maximize_focused() {
 void WindowManager::toggle_launcher() {
     launcher_open_ = !launcher_open_;
     if (launcher_open_) {
-        launcher_sel_ = 0;
+        launcher_sel_   = 0;
+        launcher_query_.clear();
     }
+}
+
+std::vector<std::size_t> WindowManager::launcher_filtered_indices() const noexcept {
+    std::vector<std::size_t> result;
+    // Lowercase the query for case-insensitive matching.
+    std::string q = launcher_query_;
+    for (char& c : q) if (c >= 'A' && c <= 'Z') c |= 0x20;
+    for (std::size_t idx = 0; idx < windows_.size(); ++idx) {
+        if (q.empty()) {
+            result.push_back(idx);
+        } else {
+            std::string t = windows_[idx].title;
+            for (char& c : t) if (c >= 'A' && c <= 'Z') c |= 0x20;
+            if (t.find(q) != std::string::npos)
+                result.push_back(idx);
+        }
+    }
+    return result;
 }
 
 void WindowManager::draw_launcher() {
     if (!launcher_open_) return;
 
-    const int W  = screen_w_;
-    const int H  = screen_h_;
+    const int W = screen_w_;
+    const int H = screen_h_;
 
+    // Build filtered window index list and use its count for layout.
+    const std::vector<std::size_t> fidx = launcher_filtered_indices();
+    const int n = static_cast<int>(fidx.size());
+    // Pass at least 1 so the card always reserves list-area space.
+    const LauncherLayout L = compute_launcher_layout(W, H, dpr_, (std::max)(n, 1));
+    auto sc = [this](int v) { return static_cast<int>(v * dpr_ + 0.5f); };
+
+    // Dim the background.
     auto dim_pkt = gpu::CmdPacket{};
-    dim_pkt.cmd    = gpu::Command::DRAW_RECT_ALPHA;
-    dim_pkt.args   = { 0, 0, uint32_t(W), uint32_t(H), 0xCC'00'00'00, 0 };
+    dim_pkt.cmd  = gpu::Command::DRAW_RECT_ALPHA;
+    dim_pkt.args = { 0, 0, uint32_t(W), uint32_t(H), 0xCC'00'00'00, 0 };
     gpu_.push_command(dim_pkt);
 
-    const int COLS    = 4;
-    const int CELL_W  = int(140 * dpr_);
-    const int CELL_H  = int(90  * dpr_);
-    const int GAP     = int(12  * dpr_);
-    const int n       = static_cast<int>(windows_.size());
-    const int rows    = (n + COLS - 1) / COLS;
-    const int panel_w = COLS * (CELL_W + GAP) - GAP + GAP * 2;
-    const int panel_h = rows * (CELL_H + GAP) - GAP + GAP * 2 + int(40 * dpr_);
-    const int px      = (W - panel_w) / 2;
-    const int py      = (H - panel_h) / 2;
+    // Drop shadow layers.
+    g_rect_a(L.px + sc(4), L.py + sc(6), L.pw, L.ph, 0x50'00'10'30);
+    g_rect_a(L.px + sc(2), L.py + sc(3), L.pw, L.ph, 0x30'00'10'30);
 
-    g_rect(px, py, panel_w, panel_h, 0xFF'0A'14'22);
-    g_line(px, py, px + panel_w, py, 0xFF'2A'50'80);
-    g_line(px, py + panel_h, px + panel_w, py + panel_h, 0xFF'2A'50'80);
-    g_text(px + GAP, py + int(26 * dpr_), 0xFF'89'B4'FA, 0, "ALT+TAB: select app  |  ENTER open  |  ESC close");
+    // ── Theme colours (matching window chrome palette) ──────────────────
+    constexpr uint32_t kCard       = 0xFF'0D'15'26;  // dark-navy card bg
+    constexpr uint32_t kAccent     = 0xFF'89'B4'FA;  // Catppuccin blue accent
+    constexpr uint32_t kBorderSide = 0xFF'2A'3D'5E;  // subtle side/bottom border
+    constexpr uint32_t kField      = 0xFF'06'0A'14;  // search field bg
+    constexpr uint32_t kFieldBr    = 0xFF'45'85'C8;  // field border / separator
+    constexpr uint32_t kRowSel     = 0xFF'17'28'44;  // selected-row highlight
+    constexpr uint32_t kText       = 0xFF'C6'D0'F5;  // primary text (light lavender)
+    constexpr uint32_t kMuted      = 0xFF'4A'6A'8A;  // muted / hint text
+    constexpr uint32_t kStatusOpen = 0xFF'89'B4'FA;  // "open" status colour
+    constexpr uint32_t kStatusMin  = 0xFF'45'85'C8;  // "min" status colour
+    constexpr uint32_t kStatusCls  = 0xFF'4A'6A'8A;  // "closed" status colour
+    constexpr uint32_t kIconBg     = 0xFF'17'28'44;  // icon circle (normal)
+    constexpr uint32_t kIconBgSel  = 0xFF'1F'35'60;  // icon circle (selected)
+    constexpr uint32_t kSeparator  = 0xFF'14'20'38;  // row separator line
 
-    const int grid_y = py + int(38 * dpr_);
+    // Card background.
+    g_rect(L.px, L.py, L.pw, L.ph, kCard);
+
+    // Top accent bar (2 px thick).
+    g_line(L.px, L.py,     L.px + L.pw, L.py,     kAccent);
+    g_line(L.px, L.py + 1, L.px + L.pw, L.py + 1, kAccent);
+
+    // Side and bottom borders (subtle).
+    const int brd = L.px + L.pw;
+    const int btm = L.py + L.ph;
+    g_line(L.px,    L.py, L.px,    btm, kBorderSide);
+    g_line(brd - 1, L.py, brd - 1, btm, kBorderSide);
+    g_line(L.px,    btm - 1, brd,  btm - 1, kBorderSide);
+
+    // ── Search input field ───────────────────────────────────────────────
+    const int inner_x = L.px + L.pad;
+    const int inner_w = L.pw - L.pad * 2;
+    const int head_y  = L.py + L.pad;
+    const int field_h = L.header_h - sc(4);
+    g_rect(inner_x, head_y, inner_w, field_h, kField);
+    // Field borders: accent top, subtle sides/bottom.
+    g_line(inner_x,             head_y,            inner_x + inner_w, head_y,            kAccent);
+    g_line(inner_x,             head_y + field_h,  inner_x + inner_w, head_y + field_h,  kFieldBr);
+    g_line(inner_x,             head_y,            inner_x,           head_y + field_h,  kFieldBr);
+    g_line(inner_x + inner_w - 1, head_y,          inner_x + inner_w - 1, head_y + field_h, kFieldBr);
+
+    const gpu::FontAtlas& f0 = gpu_.font(0);
+    const gpu::FontAtlas& f1 = gpu_.font(1);
+    const int field_text_x = inner_x + sc(10);
+    const int field_text_y =
+        head_y + static_cast<int>((field_h - f1.line_height()) * 0.5f + f1.ascent() + 0.5f);
+
+    if (launcher_query_.empty()) {
+        g_text(field_text_x, field_text_y, kMuted, 1, "Search windows...");
+    } else {
+        g_text(field_text_x, field_text_y, kText, 1, launcher_query_);
+        // Blinking cursor: toggle every ~30 frames (~500 ms at 60 fps).
+        if ((wm_tick_ / 30) % 2 == 0) {
+            const float qw  = f1.measure_width(launcher_query_.c_str());
+            const int   cx  = field_text_x + static_cast<int>(qw) + sc(1);
+            const int   ch  = static_cast<int>(f1.line_height() * 0.8f);
+            const int   cy  = head_y + (field_h - ch) / 2;
+            g_line(cx, cy, cx, cy + ch, kAccent);
+        }
+    }
+
+    // Separator between search field and window list.
+    g_line(L.px, L.list_y - sc(1), L.px + L.pw, L.list_y - sc(1), kBorderSide);
+
+    // ── Window list ──────────────────────────────────────────────────────
+    const int inset  = sc(6);
+    const int icon_r = sc(16);
+
+    if (n == 0) {
+        // No windows match the current query.
+        const std::string msg = launcher_query_.empty()
+            ? "No windows open"
+            : "No match for \"" + launcher_query_ + "\"";
+        const float mw  = f0.measure_width(msg.c_str());
+        const int   mx  = L.px + static_cast<int>((L.pw - mw) * 0.5f + 0.5f);
+        const int   my  = L.list_y
+            + static_cast<int>((L.row_h - f0.line_height()) * 0.5f + f0.ascent() + 0.5f);
+        g_text(mx, my, kMuted, 0, msg);
+    }
 
     for (int i = 0; i < n; ++i) {
-        const auto& w  = windows_[i];
-        const int   col = i % COLS;
-        const int   row = i / COLS;
-        const int   cx  = px + GAP + col * (CELL_W + GAP);
-        const int   cy  = grid_y + GAP + row * (CELL_H + GAP);
+        const auto& w   = windows_[fidx[static_cast<std::size_t>(i)]];
+        const int   ry  = L.list_y + i * L.row_h;
+        const bool  sel = (i == launcher_sel_);
 
-        const bool sel    = (i == launcher_sel_);
-        const bool open   = (w.visible && !w.minimized && !w.closing);
-        const bool closed = !w.visible && !w.closing;
+        if (sel) {
+            g_rect(L.px + inset, ry + sc(1), L.pw - inset * 2, L.row_h - sc(2), kRowSel);
+            // Accent line along the top of the selected row.
+            g_line(L.px + inset, ry + sc(1),
+                   L.px + inset + (L.pw - inset * 2), ry + sc(1), kAccent);
+        }
 
-        uint32_t cell_bg  = sel    ? 0xFF'1A'38'60
-                          : open   ? 0xFF'0E'1C'2E
-                          :          0xFF'08'10'18;
-        uint32_t brd_col  = sel    ? 0xFF'89'B4'FA
-                          : open   ? 0xFF'2A'50'80
-                          :          0xFF'18'28'3A;
-        uint32_t name_col = open   ? 0xFF'C6'D0'F5 : 0xFF'3A'58'78;
-        uint32_t stat_col = open   ? 0xFF'40'CC'60
-                          : closed ? 0xFF'40'40'60
-                          :          0xFF'CC'A0'20;
-        const char* stat  = open   ? "OPEN"
-                          : closed ? "CLOSED"
-                          :          "MIN";
+        // Icon circle with uppercased first letter of the window title.
+        const int icon_cx = inner_x + sc(18);
+        const int icon_cy = ry + L.row_h / 2;
+        g_circle(icon_cx, icon_cy, icon_r, sel ? kIconBgSel : kIconBg);
 
-        g_rect(cx, cy, CELL_W, CELL_H, cell_bg);
-        g_line(cx, cy, cx + CELL_W, cy, brd_col);
-        g_line(cx, cy + CELL_H, cx + CELL_W, cy + CELL_H, brd_col);
-        g_line(cx, cy, cx, cy + CELL_H, brd_col);
-        g_line(cx + CELL_W, cy, cx + CELL_W, cy + CELL_H, brd_col);
+        char icon_ch = w.title.empty() ? '?' : w.title.front();
+        if (icon_ch >= 'a' && icon_ch <= 'z') icon_ch = static_cast<char>(icon_ch - 32);
+        const std::string icon(1, icon_ch);
+        const float       iw  = f0.measure_width(icon.c_str());
+        const int         itx = icon_cx - static_cast<int>(iw * 0.5f + 0.5f);
+        const int         iby =
+            icon_cy + static_cast<int>(f0.ascent() - f0.line_height() * 0.5f + 0.5f);
+        g_text(itx, iby, sel ? kAccent : kText, 0, icon);
 
-        const std::string icon = w.title.substr(0, 2);
-        g_text(cx + int(8 * dpr_), cy + int(32 * dpr_), name_col, 1, icon);
+        // Window state badge.
+        const bool     open      = (w.visible && !w.minimized && !w.closing);
+        const bool     minimized = w.minimized;
+        const char*    stat      = open ? "open" : minimized ? "min" : "closed";
+        const uint32_t stat_col  = open ? kStatusOpen : minimized ? kStatusMin : kStatusCls;
 
-        std::string name = w.title;
-        if (name.size() > 14) name = name.substr(0, 13) + ".";
-        g_text(cx + int(6 * dpr_), cy + int(58 * dpr_), name_col, 0, name);
+        const float stat_w   = f0.measure_width(stat);
+        const int   text_lft = inner_x + sc(44);
+        const int   text_rgt =
+            static_cast<int>(L.px + L.pw - L.pad - stat_w - sc(6));
+        const float max_w    =
+            static_cast<float>((std::max)(sc(32), text_rgt - text_lft - sc(4)));
+        const std::string name = ellipsize_to_width(f0, w.title, max_w);
 
-        g_text(cx + int(6 * dpr_), cy + int(72 * dpr_), stat_col, 0, stat);
+        const uint32_t name_col = open ? kText : kMuted;
+        const int      row_ty   =
+            ry + static_cast<int>((L.row_h - f0.line_height()) * 0.5f + f0.ascent() + 0.5f);
+        g_text(text_lft, row_ty, name_col, 0, name);
+        g_text(text_rgt, row_ty, stat_col, 0, stat);
+
+        // Subtle row separator (skip after last row).
+        if (i < n - 1)
+            g_line(L.px + inset, ry + L.row_h - 1,
+                   L.px + L.pw - inset, ry + L.row_h - 1, kSeparator);
     }
+
+    // ── Footer hint ──────────────────────────────────────────────────────
+    const int foot_b =
+        L.list_y + (std::max)(n, 1) * L.row_h + sc(6)
+        + static_cast<int>((L.footer_h - sc(6) - f0.line_height()) * 0.5f + f0.ascent() + 0.5f);
+    const std::string hint = "type to filter   Tab/arrows move   Enter switch   Esc close";
+    const float hint_w = f0.measure_width(hint.c_str());
+    g_text(L.px + static_cast<int>((L.pw - hint_w) * 0.5f + 0.5f), foot_b, kMuted, 0, hint);
 }
 
 void WindowManager::handle_scroll(int delta) {
@@ -633,19 +815,35 @@ void WindowManager::handle_scroll(int delta) {
 }
 
 void WindowManager::handle_key(uint32_t keycode, uint32_t charcode) {
+    const uint32_t vk      = keycode & 0xFFFFu;
+    const bool     keydown = (keycode >> 20) & 1u;
     if (launcher_open_) {
-        const int n = static_cast<int>(windows_.size());
-        if (keycode == 9 /* Tab */ || keycode == 40 /* ArrowDown */ || keycode == 39 /* ArrowRight */) {
-            launcher_sel_ = (launcher_sel_ + 1) % std::max(1, n);
-        } else if (keycode == 38 /* ArrowUp */ || keycode == 37 /* ArrowLeft */) {
-            launcher_sel_ = (launcher_sel_ - 1 + std::max(1, n)) % std::max(1, n);
-        } else if (keycode == 13 /* Enter */) {
-            if (launcher_sel_ >= 0 && launcher_sel_ < n) {
-                reopen_window(windows_[launcher_sel_].id);
+        if (!keydown) return;
+        const std::vector<std::size_t> fidx = launcher_filtered_indices();
+        const int n = static_cast<int>(fidx.size());
+        if (vk == 9 /* Tab */ || vk == 40 /* ArrowDown */) {
+            launcher_sel_ = (n > 0) ? (launcher_sel_ + 1) % n : 0;
+        } else if (vk == 38 /* ArrowUp */) {
+            launcher_sel_ = (n > 0) ? (launcher_sel_ - 1 + n) % n : 0;
+        } else if (vk == 13 /* Enter */) {
+            if (launcher_sel_ >= 0 && launcher_sel_ < n)
+                reopen_window(windows_[fidx[static_cast<std::size_t>(launcher_sel_)]].id);
+            launcher_open_ = false;
+        } else if (vk == 27 /* Escape */) {
+            if (!launcher_query_.empty()) {
+                launcher_query_.clear();
+                launcher_sel_ = 0;
+            } else {
+                launcher_open_ = false;
             }
-            launcher_open_ = false;
-        } else if (keycode == 27 /* Escape */) {
-            launcher_open_ = false;
+        } else if (vk == 8 /* Backspace */) {
+            if (!launcher_query_.empty()) {
+                launcher_query_.pop_back();
+                launcher_sel_ = 0;
+            }
+        } else if (charcode >= 0x20 && charcode < 0x7F) {
+            launcher_query_ += static_cast<char>(charcode);
+            launcher_sel_ = 0;  // reset selection on each new character
         }
         return;
     }
@@ -655,12 +853,13 @@ void WindowManager::handle_key(uint32_t keycode, uint32_t charcode) {
     if (!w) return;
 
     if (w->title_editing) {
-        if (keycode == 13) {  // Enter: commit
+        if (!keydown) return;
+        if (vk == 13) {  // Enter: commit
             w->title         = w->title_edit_buf;
             w->title_editing = false;
-        } else if (keycode == 27) {  // Escape: cancel
+        } else if (vk == 27) {  // Escape: cancel
             w->title_editing = false;
-        } else if (keycode == 8) {   // Backspace
+        } else if (vk == 8) {   // Backspace
             if (!w->title_edit_buf.empty())
                 w->title_edit_buf.pop_back();
         } else if (charcode >= 0x20 && charcode < 0x7F) {
@@ -688,20 +887,28 @@ void WindowManager::draw_chrome(const Window& win) {
     auto cr = win.content_rect();
     g_rect(cr.x, cr.y, cr.w, cr.h, CLR_BG_WIN);
 
-    const int btn_cy = f.y + th / 2;
-    const int r      = int(5 * dpr_);
-    const int step   = int(12 * dpr_);
-    g_circle(f.x + f.w - step,     btn_cy, r, CLR_CLOSE_BTN);
-    g_circle(f.x + f.w - step * 2, btn_cy, r, CLR_MIN_BTN);
-    g_circle(f.x + f.w - step * 3, btn_cy, r, CLR_MAX_BTN);
+    // While shrinking to close, hide title and window buttons immediately so they
+    // do not float over the collapsing frame until the animation ends.
+    if (!win.closing) {
+        const int btn_cy = f.y + th / 2;
+        const int r      = int(5 * dpr_);
+        const int step   = int(12 * dpr_);
+        g_circle(f.x + f.w - step,     btn_cy, r, CLR_CLOSE_BTN);
+        g_circle(f.x + f.w - step * 2, btn_cy, r, CLR_MIN_BTN);
+        g_circle(f.x + f.w - step * 3, btn_cy, r, CLR_MAX_BTN);
 
-    const int ty = f.y + (th + int(8 * dpr_)) / 2;
-    const uint32_t title_col = win.focused ? 0xFF'C6'D0'F5 : 0xFF'4A'5A'70;
-    if (win.title_editing) {
-        const std::string display = win.title_edit_buf + "|";
-        g_text(f.x + int(8 * dpr_), ty, 0xFF'F0'D0'50, 0, display);
-    } else {
-        g_text(f.x + int(8 * dpr_), ty, title_col, 0, win.title);
+        const gpu::FontAtlas& tf  = gpu_.font(0);
+        const float           tlh = tf.line_height();
+        const float           tas = tf.ascent();
+        const int title_y =
+            f.y + static_cast<int>((th - tlh) * 0.5f + tas + 0.5f);
+        const uint32_t title_col = win.focused ? 0xFF'C6'D0'F5 : 0xFF'4A'5A'70;
+        if (win.title_editing) {
+            const std::string display = win.title_edit_buf + "|";
+            g_text(f.x + int(8 * dpr_), title_y, 0xFF'F0'D0'50, 0, display);
+        } else {
+            g_text(f.x + int(8 * dpr_), title_y, title_col, 0, win.title);
+        }
     }
 }
 
@@ -755,7 +962,12 @@ void WindowManager::draw_taskbar(uint32_t tick_count, uint64_t cpu_cycles, std::
     const float dp = dpr_;
     auto sc = [dp](int n){ return int(n * dp + 0.5f); };
 
-    g_text(sc(10), sc(14), 0xFF'89'B4'FA, 0, "JadeOS");
+    const gpu::FontAtlas& f0   = gpu_.font(0);
+    const float           lh   = f0.line_height();
+    const float           asc  = f0.ascent();
+    const int             ty   = static_cast<int>((TH - lh) * 0.5f + asc + 0.5f);
+
+    g_text(sc(10), ty, 0xFF'89'B4'FA, 0, "JadeOS");
 
     int bx = sc(72);
     int win_idx = 1;
@@ -779,7 +991,7 @@ void WindowManager::draw_taskbar(uint32_t tick_count, uint64_t cpu_cycles, std::
         g_line(bx+sc(21), sc(5),     bx + sc(21), TH-sc(5),  dot_col);
         char num[3];
         std::snprintf(num, sizeof(num), "%d", win_idx);
-        g_text(bx + sc(7), sc(14), dot_col, 0, num);
+        g_text(bx + sc(7), ty, dot_col, 0, num);
         bx += sc(26);
         ++win_idx;
     }
@@ -792,7 +1004,7 @@ void WindowManager::draw_taskbar(uint32_t tick_count, uint64_t cpu_cycles, std::
         const float tw = gpu_.font(0).measure_width(centre_title.c_str());
         const int tx = static_cast<int>((W - tw) / 2.f);
         g_rect(tx - sc(8), sc(5), static_cast<int>(tw) + sc(16), TH - sc(10), 0xFF'0F'1A'28);
-        g_text(tx, sc(14), 0xFF'C6'D0'F5, 0, centre_title);
+        g_text(tx, ty, 0xFF'C6'D0'F5, 0, centre_title);
     }
 
     const uint32_t h24 = wall_hour_;
@@ -804,13 +1016,13 @@ void WindowManager::draw_taskbar(uint32_t tick_count, uint64_t cpu_cycles, std::
     std::snprintf(clk, sizeof(clk), "%u:%02u:%02u %s", h12, m, s, ampm);
     (void)tick_count;
     const float clk_w = gpu_.font(0).measure_width(clk);
-    g_text(static_cast<int>(W - clk_w - sc(10)), sc(14), 0xFF'C6'D0'F5, 0, clk);
+    g_text(static_cast<int>(W - clk_w - sc(10)), ty, 0xFF'C6'D0'F5, 0, clk);
 
     (void)cpu_cycles;
     char stat[32];
     std::snprintf(stat, sizeof(stat), "ram:%zuM", ram_mib);
     const float stat_w = gpu_.font(0).measure_width(stat);
-    g_text(static_cast<int>(W - clk_w - stat_w - sc(22)), sc(14), 0xFF'4A'6A'8A, 0, stat);
+    g_text(static_cast<int>(W - clk_w - stat_w - sc(22)), ty, 0xFF'4A'6A'8A, 0, stat);
 }
 
 void WindowManager::set_wall_time(uint32_t unix_sec) noexcept {

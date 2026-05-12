@@ -1,4 +1,4 @@
-project('jadeportfolio', 'cpp',
+project('jadeportfolio', ['cpp', 'c'],
   version : '0.1.0',
   default_options : [
     'cpp_std=c++20',
@@ -19,8 +19,9 @@ if host_machine.system() == 'emscripten'
   web_link_flags += [
     '-sALLOW_MEMORY_GROWTH=1',
     '-sINITIAL_MEMORY=268435456',   # 256 MiB
-    '-sMAXIMUM_MEMORY=1073741824',  # 1 GiB cap
-    '-sEXPORTED_RUNTIME_METHODS=["ccall","cwrap","HEAPU8","HEAPU32"]',
+    '-sMAXIMUM_MEMORY=2147483648',  # 2 GiB cap (HiDPI + Freedoom + guest RAM)
+    '-sEXPORTED_RUNTIME_METHODS=["ccall","cwrap","HEAPU8","HEAPU32","FS"]',
+    '-sFORCE_FILESYSTEM=1',
     '-sEXPORT_ES6=1',
     '-sMODULARIZE=1',
     '-sEXPORT_NAME=JadePortfolioModule',

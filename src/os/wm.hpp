@@ -147,6 +147,9 @@ public:
 
     int focused_id() const noexcept { return focused_id_; }
 
+    // True when the window exists and would be painted (visible, not minimized/closing).
+    bool window_shown(int id) const noexcept;
+
     static constexpr int TASKBAR_H   = 28;  // waybar height
     static constexpr int STATUSBAR_H  = 0;   // no bottom bar (waybar only)
 
@@ -176,12 +179,16 @@ private:
 
     bool                launcher_open_  = false;
     int                 launcher_sel_   = 0;
+    std::string         launcher_query_;
 
     Window* find(int id);
     void draw_chrome(const Window& win);
     ResizeEdge hit_edge(const Window& w, int x, int y) const noexcept;
     bool       hit_titlebar(const Window& w, int x, int y) const noexcept;
     void       bring_to_front(int id);
+
+    // Returns indices into windows_ matching launcher_query_ (case-insensitive substring).
+    std::vector<std::size_t> launcher_filtered_indices() const noexcept;
 
     void g_rect(int x, int y, int w, int h, uint32_t col);
     void g_rect_a(int x, int y, int w, int h, uint32_t col);

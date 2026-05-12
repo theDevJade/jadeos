@@ -62,6 +62,10 @@ public:
     const uint8_t*  str_pool_ptr() const noexcept { return reinterpret_cast<const uint8_t*>(str_pool_.data()); }
     uint32_t        str_pool_len() const noexcept { return static_cast<uint32_t>(str_pool_.size()); }
 
+    // RGBA8 pixel blobs for BLIT commands (WebGPU path only).
+    const uint8_t*  blit_pool_ptr() const noexcept { return blit_pool_.data(); }
+    uint32_t        blit_pool_len() const noexcept { return static_cast<uint32_t>(blit_pool_.size()); }
+
     // Persistent glyph metric buffer: 9 floats x 96 glyphs per font size.
     // Populated by load_font(); valid for the lifetime of the GPU object.
     const float*    glyph_metrics_ptr(uint8_t size_id) const noexcept;
@@ -97,6 +101,7 @@ private:
     bool                  webgpu_mode_ = false;
     std::vector<uint32_t> cmd_buf_;
     std::string           str_pool_;
+    std::vector<uint8_t>  blit_pool_;
     std::vector<float>    glyph_metrics_[NUM_FONT_SIZES];
 
     // Active scissor rectangle (pixel-exclusive x1/y1). Full FB when has_scissor_==false.

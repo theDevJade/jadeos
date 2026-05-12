@@ -617,7 +617,7 @@ void Terminal::cmd_neofetch() {
         "  +:::::::::::+      Shell: /bin/bash",
         "   ++++++++++++      WM: jade-wm (tiling + drag)",
         "    ..........       GPU: JadeGPU (software rasteriser)",
-        "                     Fonts: Monaco TrueType (stb_truetype)",
+        "                     Fonts: Hack TrueType (stb_truetype)",
     });
     std::snprintf(buf, sizeof(buf),
         "                     Memory: %zu MiB total", mem_mib);
@@ -684,6 +684,9 @@ void Terminal::cmd_ping(const std::string& arg) {
 }
 
 void Terminal::send_key(uint32_t keycode, uint32_t charcode) {
+    // JS sends keyup too (bit 20 clear); shell/nano only react to keydown.
+    if (((keycode >> 20) & 1u) == 0) return;
+
     blink_on_   = true;
     blink_tick_ = 0;
 
@@ -937,9 +940,14 @@ void Terminal::render(gpu::GPU& gpu, WinRect area, uint32_t tick) {
                     : lines[r];
                 const int cx = area.x + sc_pad * 2 +
                                static_cast<int>(gpu.font(0).measure_width(before));
-                if (blink_on_)
-                    t_rect(gpu, cx, content_y + (r - L0) * sc_lh + 2,
-                           2, sc_lh - 4, 0xFF'89'B4'FA);
+                if (blink_on_) {
+                    const gpu::FontAtlas& nf = gpu.font(0);
+                    const int row_base = content_y + (r - L0) * sc_lh + sc_pad;
+                    const int curs_y =
+                        row_base - static_cast<int>(nf.ascent() + 0.5f);
+                    const int curs_h = static_cast<int>(nf.line_height() + 0.5f);
+                    t_rect(gpu, cx, curs_y, 2, curs_h, 0xFF'89'B4'FA);
+                }
             }
         }
 
@@ -1008,22 +1016,29 @@ void Terminal::render(gpu::GPU& gpu, WinRect area, uint32_t tick) {
     // Input bar background
     t_rect(gpu, area.x, input_bar_y, area.w, sc_prompt_h, TC_BG);
 
-    // Prompt
     static const std::string PROMPT = "jade@jadeos:~$ ";
-    const int prompt_w = static_cast<int>(gpu.font(0).measure_width(PROMPT));
-    t_text(gpu, area.x + sc_pad, input_bar_y + static_cast<int>(3 * dpr_ + 0.5f),
-           TC_PROMPT, PROMPT);
+
+    // Prompt + input share one baseline vertically centered in the prompt bar.
+    const gpu::FontAtlas& f0    = gpu.font(0);
+    const float           lh    = f0.line_height();
+    const float           asc   = f0.ascent();
+    const int input_base =
+        input_bar_y + static_cast<int>((sc_prompt_h - lh) * 0.5f + asc + 0.5f);
+
+    t_text(gpu, area.x + sc_pad, input_base, TC_PROMPT, PROMPT);
 
     // Input text
+    const int prompt_w = static_cast<int>(f0.measure_width(PROMPT));
     const int input_x = area.x + sc_pad + prompt_w;
-    const int input_y = input_bar_y + static_cast<int>(3 * dpr_ + 0.5f);
-    t_text(gpu, input_x, input_y, TC_CMD, input_);
+    t_text(gpu, input_x, input_base, TC_CMD, input_);
 
-    // Cursor
+    // Cursor (glyph box: baseline minus ascent, height = line height)
     if (blink_on_) {
         const std::string before = input_.substr(0, static_cast<std::size_t>(cursor_pos_));
-        const int cx = input_x + static_cast<int>(gpu.font(0).measure_width(before));
-        t_rect(gpu, cx, input_y, 1, sc_line_h - 2, TC_CURSOR);
+        const int cx = input_x + static_cast<int>(f0.measure_width(before));
+        const int curs_y = input_base - static_cast<int>(asc + 0.5f);
+        const int curs_h = static_cast<int>(lh + 0.5f);
+        t_rect(gpu, cx, curs_y, 2, curs_h, TC_CURSOR);
     }
 }
 

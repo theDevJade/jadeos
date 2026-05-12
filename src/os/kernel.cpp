@@ -1,4 +1,5 @@
 #include "kernel.hpp"
+#include "../audio/jade_audio.hpp"
 #include "../gpu/framebuffer.hpp"
 #include "apps/clock.hpp"
 #include "apps/calculator.hpp"
@@ -53,6 +54,12 @@ void Kernel::boot(uint32_t mem_mib, std::vector<uint8_t> ttf_data,
 
     if (!ttf_data.empty())
         gpu_.load_font(ttf_data, dpr_);
+
+#ifdef __EMSCRIPTEN__
+    jade::audio::init(48000, 4);
+    doom_port_.set_context(&gpu_, &memory_);
+    media_player_.set_context(&gpu_, &memory_);
+#endif
 
     const std::size_t kernel_reserved = 256 * 1024;
     if (mem_bytes > kernel_reserved)
@@ -300,7 +307,6 @@ static constexpr const char* ABOUT_LINES[] = {
     "GPU rasterizers, and anything that touches bare metal.",
     "",
     "Currently: Knull + Vixen, a huge space game written in scratch in Rust, and Mixtape, an open source music player for all platforms written in Flutter.",
-    "running entirely in the browser via WebAssembly.",
 };
 
 struct ContactRow {
@@ -667,12 +673,49 @@ void Kernel::load_init_program() {
     sched_.spawn("files",       "/usr/bin/files",       2, 9,  2048, {});
     sched_.spawn("taskmanager", "/usr/bin/taskmanager", 2, 10, 1024, {});
     sched_.spawn("wasminfo",    "/usr/bin/wasminfo",    2, 11, 512,  {});
+
+#ifdef __EMSCRIPTEN__
+    doom_win_id_ = wm_.add_window(
+        { 0, 0, 0, 0 },
+        "freedoom.app",
+        [this](gpu::GPU& g, os::WinRect area) {
+            doom_port_.render(g, area, tick_count_, dpr_);
+        },
+        {},
+        [this](uint32_t kc, uint32_t ch) {
+            doom_port_.on_key(kc, ch);
+        }
+    );
+    wm_.set_always_dirty(doom_win_id_, true);
+    wm_.toggle_minimize(doom_win_id_);
+    sched_.spawn("freedoom", "/usr/games/freedoom", 2, 12, 8192, {});
+
+    media_win_id_ = wm_.add_window(
+        { 0, 0, 0, 0 },
+        "media.app",
+        [this](gpu::GPU& g, os::WinRect area) {
+            media_player_.render(g, area, tick_count_, dpr_);
+        },
+        [this](int cx, int cy) {
+            media_player_.on_click(cx, cy, dpr_);
+            wm_.mark_dirty(media_win_id_);
+        }
+    );
+    wm_.toggle_minimize(media_win_id_);
+    sched_.spawn("media", "/usr/bin/media", 2, 13, 4096, {});
+#endif
 }
 
 void Kernel::tick(uint64_t cpu_cycles_per_tick) {
     if (!running_) return;
 
     ++tick_count_;
+
+#ifdef __EMSCRIPTEN__
+    media_player_.step(tick_count_);
+    if (media_win_id_ >= 0)
+        wm_.set_always_dirty(media_win_id_, media_player_.wants_always_dirty());
+#endif
 
     // Spring physics and frame render run every kernel tick so window
     // positions in the GPU command buffer are always up-to-date.
@@ -703,6 +746,22 @@ void Kernel::send_mouseup() {
     wm_.mouse_up();
 }
 
+#ifdef __EMSCRIPTEN__
+void Kernel::send_mouse_game(int32_t dx, int32_t dy, uint32_t buttons) noexcept
+{
+    if (doom_win_id_ < 0 || wm_.focused_id() != doom_win_id_)
+        return;
+    doom_port_.on_mouse(dx, dy, buttons);
+}
+
+bool Kernel::doom_pointer_lock_desired() const noexcept
+{
+    if (doom_win_id_ < 0 || wm_.focused_id() != doom_win_id_)
+        return false;
+    return doom_port_.wants_pointer_lock();
+}
+#endif
+
 void Kernel::send_scroll(int delta) {
     wm_.handle_scroll(delta);
 }
@@ -710,14 +769,16 @@ void Kernel::send_scroll(int delta) {
 void Kernel::send_key(uint32_t keycode, uint32_t charcode) {
     // Modifier bits packed in high half by JS (see index.html):
     //   bit16 = Shift, bit17 = Ctrl, bit18 = Alt, bit19 = Meta
+    //   bit20 = keydown (1) vs keyup (0); bit21 = DOM autorepeat (keydown only)
     const uint32_t key  = keycode & 0xFFFF;
+    const bool     keydown = (keycode >> 20) & 1;
     const bool     shift = (keycode >> 16) & 1;
     const bool     ctrl  = (keycode >> 17) & 1;
     const bool     alt   = (keycode >> 18) & 1;
     (void)shift;
 
     // Alt keybindings (global, handled before forwarding to WM).
-    if (alt) {
+    if (alt && keydown) {
         if (key == 9) {
             wm_.toggle_launcher();
             return;
@@ -736,7 +797,7 @@ void Kernel::send_key(uint32_t keycode, uint32_t charcode) {
         }
     }
 
-    wm_.handle_key(key, charcode);
+    wm_.handle_key(keycode, charcode);
     (void)ctrl;
 }
 

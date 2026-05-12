@@ -1,4 +1,5 @@
 #include "../os/kernel.hpp"
+#include "../audio/jade_audio.hpp"
 #include "../gpu/framebuffer.hpp"
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
@@ -180,6 +181,9 @@ void wasm_gpu_push(uint32_t cmd,
 void wasm_send_mousedown(uint32_t x, uint32_t y) { g_kernel.send_mousedown(x, y); }
 void wasm_send_mousemove(uint32_t x, uint32_t y) { g_kernel.send_mousemove(x, y); }
 void wasm_send_mouseup()                          { g_kernel.send_mouseup(); }
+void wasm_send_mouse_game(int32_t dx, int32_t dy, uint32_t buttons) {
+    g_kernel.send_mouse_game(dx, dy, buttons);
+}
 void wasm_send_scroll(int delta)                  { g_kernel.send_scroll(delta); }
 
 // Forward keyboard input to the focused window.
@@ -207,9 +211,10 @@ void wasm_set_webgpu_mode(bool enable) {
 // Valid until the next tick() call.  Each record is 8 x uint32_t (32 bytes).
 //   record[0] = type(u8)|size_id(u8)<<8|str_len(u16)<<16
 //   record[1..4] = x0,y0,x1/w,y1/h as float bits
-//   record[5] = packed color 0xAARRGGBB
-//   record[6] = string pool byte offset (TEXT cmds)
-//   record[7] = flags (0x01 = alpha-blend)
+//   record[5] = packed color 0xAARRGGBB, or BLIT: byte offset into getBlitPool()
+//   record[6] = string pool byte offset (TEXT cmds), or BLIT byte length (w*h*4)
+//   record[7] = flags (0x01 = alpha-blend); BLIT: unused (0)
+// BLIT record type is 0x06; pixel bytes are RGBA8, tightly packed by row.
 emscripten::val wasm_get_cmd_buf() {
     const uint32_t* p = g_kernel.gpu().cmd_buf_ptr();
     const uint32_t  n = g_kernel.gpu().cmd_buf_len();
@@ -221,6 +226,14 @@ emscripten::val wasm_get_cmd_buf() {
 emscripten::val wasm_get_str_pool() {
     const uint8_t* p = g_kernel.gpu().str_pool_ptr();
     const uint32_t n = g_kernel.gpu().str_pool_len();
+    if (!p || !n) return emscripten::val::null();
+    return emscripten::val(emscripten::typed_memory_view(n, p));
+}
+
+// RGBA8 rows for BLIT commands (WebGPU mode). Valid until next tick().
+emscripten::val wasm_get_blit_pool() {
+    const uint8_t* p = g_kernel.gpu().blit_pool_ptr();
+    const uint32_t n = g_kernel.gpu().blit_pool_len();
     if (!p || !n) return emscripten::val::null();
     return emscripten::val(emscripten::typed_memory_view(n, p));
 }
@@ -256,10 +269,56 @@ emscripten::val wasm_get_atlas_info(uint8_t size_id) {
     return obj;
 }
 
+void wasm_set_freedoom_iwad_ready(bool v) {
+#ifdef __EMSCRIPTEN__
+    g_kernel.set_freedoom_iwad_ready(v);
+#else
+    (void)v;
+#endif
+}
+
+void wasm_set_media_assets_ready(bool v) {
+#ifdef __EMSCRIPTEN__
+    g_kernel.set_media_assets_ready(v);
+#else
+    (void)v;
+#endif
+}
+
+void wasm_set_media_clip_ready(bool v) {
+#ifdef __EMSCRIPTEN__
+    g_kernel.set_media_clip_ready(v);
+#else
+    (void)v;
+#endif
+}
+
+emscripten::val wasm_pull_audio_pcm_s16(uint32_t max_frames) {
+    static thread_local std::vector<std::int16_t> buf;
+    if (max_frames == 0)
+        return emscripten::val::null();
+    buf.resize(static_cast<std::size_t>(max_frames) * 2u);
+    const std::uint32_t n =
+        jade::audio::dequeue_stereo_i16(buf.data(), max_frames);
+    if (n == 0)
+        return emscripten::val::null();
+    return emscripten::val(
+        emscripten::typed_memory_view(static_cast<std::size_t>(n) * 2u, buf.data()));
+}
+
+std::uint32_t wasm_audio_sample_rate() { return jade::audio::sample_rate(); }
+
+bool wasm_doom_pointer_lock_desired() { return g_kernel.doom_pointer_lock_desired(); }
+
 // heh spaghetti bindings
 EMSCRIPTEN_BINDINGS(jadeportfolio) {
+    emscripten::function("setFreedoomIwadReady", &wasm_set_freedoom_iwad_ready);
+    emscripten::function("setMediaAssetsReady", &wasm_set_media_assets_ready);
+    emscripten::function("setMediaClipReady", &wasm_set_media_clip_ready);
     emscripten::function("boot",               &wasm_boot);
     emscripten::function("tick",               &wasm_tick);
+    emscripten::function("pullAudioPcmS16",    &wasm_pull_audio_pcm_s16);
+    emscripten::function("audioSampleRate",    &wasm_audio_sample_rate);
     emscripten::function("getFramebuffer",     &wasm_get_framebuffer);
     emscripten::function("framebufferWidth",   &wasm_framebuffer_width);
     emscripten::function("framebufferHeight",  &wasm_framebuffer_height);
@@ -270,6 +329,8 @@ EMSCRIPTEN_BINDINGS(jadeportfolio) {
     emscripten::function("sendMouseDown",      &wasm_send_mousedown);
     emscripten::function("sendMouseMove",      &wasm_send_mousemove);
     emscripten::function("sendMouseUp",        &wasm_send_mouseup);
+    emscripten::function("sendMouseGame",      &wasm_send_mouse_game);
+    emscripten::function("doomPointerLockDesired", &wasm_doom_pointer_lock_desired);
     emscripten::function("sendScroll",         &wasm_send_scroll);
     emscripten::function("sendKey",            &wasm_send_key);
     emscripten::function("allocFontBuffer",    &wasm_alloc_font_buffer);
@@ -279,6 +340,7 @@ EMSCRIPTEN_BINDINGS(jadeportfolio) {
     emscripten::function("setWebGpuMode",      &wasm_set_webgpu_mode);
     emscripten::function("getCmdBuf",          &wasm_get_cmd_buf);
     emscripten::function("getStrPool",         &wasm_get_str_pool);
+    emscripten::function("getBlitPool",        &wasm_get_blit_pool);
     emscripten::function("getAtlasBitmap",     &wasm_get_atlas_bitmap);
     emscripten::function("getAtlasInfo",       &wasm_get_atlas_info);
 }

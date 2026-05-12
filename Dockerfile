@@ -1,24 +1,44 @@
 # syntax=docker/dockerfile:1
-# Static WASM site behind Coolify + Traefik (Traefik handles HTTPS; nginx listens on 5883).
+# Static WASM site: nginx on 5883. Put TLS in front (for example Traefik).
 
 FROM emscripten/emsdk:4.0.23 AS build
 
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends meson ninja-build \
+    && apt-get install -y --no-install-recommends \
+       meson \
+       ninja-build \
+       git \
+       curl \
+       ca-certificates \
+       python3 \
+       ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY . .
 
+# Network: downloads stb_image.h. third_party/doomgeneric must be in the build context.
+RUN chmod +x scripts/vendor-third-party.sh \
+    && ./scripts/vendor-third-party.sh
+
+RUN chmod +x scripts/export-badapple-media.sh \
+    && (test -f assets/videos/badapple.mp4 \
+        && BADAPPLE_MP4=assets/videos/badapple.mp4 ./scripts/export-badapple-media.sh || true)
+
 RUN meson setup /build --cross-file=cross/emscripten.ini \
     && meson compile -C /build
 
-# Same layout as serve.sh: single directory for index.html, bundle, and font.
-RUN mkdir -p /opt/site \
-    && cp web/index.html /opt/site/ \
+# Match serve.sh: site root plus media/ for media.app.
+RUN mkdir -p /opt/site/media \
+    && cp web/index.html web/favicon.svg /opt/site/ \
     && cp /build/src/jadeportfolio.js /build/src/jadeportfolio.wasm /opt/site/ \
-    && cp assets/fonts/Monaco.ttf /opt/site/Monaco.ttf
+    && cp assets/fonts/Hack-Regular.ttf /opt/site/Hack-Regular.ttf \
+    && (test -f assets/images/amazingimage.png \
+        && cp assets/images/amazingimage.png /opt/site/media/amazingimage.png || true) \
+    && mkdir -p /opt/site/media/badapple \
+    && (test -f assets/videos/badapple/sequence.txt \
+        && cp -R assets/videos/badapple/* /opt/site/media/badapple/ || true)
 
 FROM nginx:1.27-alpine
 

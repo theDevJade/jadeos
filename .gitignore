@@ -35,3 +35,16 @@ vgcore.*
 # Local env (secrets, machine-specific)
 .env
 .env.*
+
+# Optional local Freedoom IWAD (extract freedoom1.wad from official zip into web/)
+web/freedoom1.wad
+# Optional copies for serve.sh (FREEDOOM_IWAD / assets paths; see serve.sh)
+assets/freedoom1.wad
+assets/freedoom.zip
+
+# Media.app: local source MP4 + generated frames / manifest / WAV (not committed)
+assets/videos/badapple.mp4
+assets/videos/badapple/frame_*.png
+assets/videos/badapple/sequence.txt
+assets/videos/badapple/audio.wav
+

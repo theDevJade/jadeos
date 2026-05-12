@@ -1,0 +1,10 @@
+# Copy to sequence.txt after running scripts/export-badapple-media.sh
+# Line 1: fps (float; script writes "fps <value>")
+# Line 2: printf pattern relative to /media/badapple/
+# Line 3: frame count
+# Line 4: PCM WAV filename (48 kHz s16le mono or stereo; script writes audio.wav)
+
+fps 30
+frame_%06d.png
+0
+audio.wav

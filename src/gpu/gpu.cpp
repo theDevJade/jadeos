@@ -58,6 +58,7 @@ void GPU::flush() {
         // Serialise FIFO to a compact binary buffer; skip software rasterisation.
         cmd_buf_.clear();
         str_pool_.clear();
+        blit_pool_.clear();
         cmd_buf_.reserve(fifo_.size() * 8);
         for (auto& dc : fifo_) {
             std::visit([this](auto&& cmd) {
@@ -133,6 +134,30 @@ void GPU::serialize_cmd(const CmdPacket& pkt) {
         pf(float(int32_t(a[2]))); pf(float(int32_t(a[3])));
         pz(); pz(); pz();
         break;
+    case Command::BLIT: {
+        const uint8_t* src = mem_.raw_ptr(a[0]);
+        if (!src) break;
+        const int32_t bw = static_cast<int32_t>(a[3]);
+        const int32_t bh = static_cast<int32_t>(a[4]);
+        if (bw < 1 || bh < 1) break;
+        const std::size_t nbytes =
+            static_cast<std::size_t>(bw) * static_cast<std::size_t>(bh) * 4u;
+        // Match DoomPort staging cap
+        constexpr std::size_t kMaxBlitBytes = 48u << 20;
+        if (nbytes > kMaxBlitBytes) break;
+        const std::size_t off = blit_pool_.size();
+        blit_pool_.resize(off + nbytes);
+        std::memcpy(blit_pool_.data() + off, src, nbytes);
+        pi(t);
+        pf(float(static_cast<int32_t>(a[1])));
+        pf(float(static_cast<int32_t>(a[2])));
+        pf(float(bw));
+        pf(float(bh));
+        pi(static_cast<uint32_t>(off));
+        pi(static_cast<uint32_t>(nbytes));
+        pz();
+        break;
+    }
     case Command::CLEAR_SCISSOR:
     case Command::FLIP:
         pi(t); pz(); pz(); pz(); pz(); pz(); pz(); pz();

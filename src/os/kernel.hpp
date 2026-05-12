@@ -9,6 +9,10 @@
 #include "apps/calculator.hpp"
 #include "apps/fileexplorer.hpp"
 #include "apps/taskmanager.hpp"
+#ifdef __EMSCRIPTEN__
+#include "apps/doom_port.hpp"
+#include "apps/media_player.hpp"
+#endif
 #include <array>
 #include <cstdint>
 #include <string>
@@ -82,6 +86,14 @@ public:
 
     void mark_terminal_dirty() noexcept;
 
+#ifdef __EMSCRIPTEN__
+    void set_freedoom_iwad_ready(bool v) noexcept { doom_port_.set_iwad_ready(v); }
+    void set_media_assets_ready(bool v) noexcept { media_player_.set_fs_ready(v); }
+    void set_media_clip_ready(bool v) noexcept { media_player_.set_clip_fs_ready(v); }
+    void send_mouse_game(int32_t dx, int32_t dy, uint32_t buttons) noexcept;
+    [[nodiscard]] bool doom_pointer_lock_desired() const noexcept;
+#endif
+
 private:
     static constexpr int FD_MAX = 256;
 
@@ -110,10 +122,19 @@ private:
     int               tasks_win_id_    = -1;
     int               wasm_win_id_     = -1;
 
+#ifdef __EMSCRIPTEN__
+    int               doom_win_id_     = -1;
+    int               media_win_id_    = -1;
+#endif
+
     // Per-app state (non-trivial apps only).
     apps::CalculatorState   calc_state_;
     apps::FileExplorerState files_state_;
     apps::TaskManagerState  tasks_state_;
+#ifdef __EMSCRIPTEN__
+    DoomPort          doom_port_;
+    MediaPlayerApp    media_player_;
+#endif
 
     // Open file descriptor table (fd 0/1/2 = stdin/stdout/stderr = Tty).
     std::array<FileDescriptor, FD_MAX> fd_table_{};

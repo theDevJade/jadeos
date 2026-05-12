@@ -17,9 +17,9 @@ static std::vector<uint8_t> slurp(const char* path) {
 
 int main() {
     os::Kernel kernel;
-    auto ttf = slurp("assets/fonts/Monaco.ttf");
+    auto ttf = slurp("assets/fonts/Hack-Regular.ttf");
     if (ttf.empty())
-        std::cerr << "[warn] Monaco.ttf not found text will be blank\n";
+        std::cerr << "[warn] Hack-Regular.ttf not found text will be blank\n";
     kernel.boot(8, std::move(ttf));
     std::cout << "JadeOS booted (native smoke-test).\n";
     constexpr uint64_t TEST_TICKS = 200;
