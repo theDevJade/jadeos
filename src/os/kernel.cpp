@@ -6,10 +6,14 @@
 #include "apps/fileexplorer.hpp"
 #include "apps/taskmanager.hpp"
 #include "apps/wasminfo.hpp"
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <cmath>
+#include <sstream>
 #include <string>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -69,9 +73,9 @@ void Kernel::boot(uint32_t mem_mib, std::vector<uint8_t> ttf_data,
     fs_.init_vfs();
     fs_.set_proc_scheduler(&sched_);
 
-    fd_table_[0] = { FdType::Tty, 0, 0, true,  false };
-    fd_table_[1] = { FdType::Tty, 0, 0, false, true  };
-    fd_table_[2] = { FdType::Tty, 0, 0, false, true  };
+    fd_table_[0] = { FdType::Tty, 0, 0, true,  false, {} };
+    fd_table_[1] = { FdType::Tty, 0, 0, false, true,  {} };
+    fd_table_[2] = { FdType::Tty, 0, 0, false, true,  {} };
 
     terminal_.configure(&sched_, &fs_, mem_bytes, dpr_, &wm_, &tick_count_);
 
@@ -126,16 +130,17 @@ void Kernel::install_syscalls() {
             }
             int fd = alloc_fd();
             if (fd < 0) { regs.set(cpu::Reg::R0, ~0u); return; }
-            if      (path == "/dev/null")    fd_table_[fd] = { FdType::DevNull,   0, 0, true, true  };
-            else if (path == "/dev/zero")    fd_table_[fd] = { FdType::DevZero,   0, 0, true, true  };
+            if      (path == "/dev/null")    fd_table_[fd] = { FdType::DevNull,   0, 0, true, true,  {} };
+            else if (path == "/dev/zero")    fd_table_[fd] = { FdType::DevZero,   0, 0, true, true,  {} };
             else if (path == "/dev/random"
-                  || path == "/dev/urandom") fd_table_[fd] = { FdType::DevRandom, 0, 0, true, false };
+                  || path == "/dev/urandom") fd_table_[fd] = { FdType::DevRandom, 0, 0, true, false, {} };
             else if (path == "/dev/tty"
-                  || path == "/dev/tty0")    fd_table_[fd] = { FdType::Tty,       0, 0, true, true  };
+                  || path == "/dev/tty0")    fd_table_[fd] = { FdType::Tty,       0, 0, true, true,  {} };
             else {
                 uint32_t ino = fs_.lookup(path);
                 if (ino == 0) { fd_table_[fd] = {}; regs.set(cpu::Reg::R0, ~0u); return; }
-                fd_table_[fd] = { FdType::VfsFile, ino, 0, true, false };
+                fd_table_[fd] = { FdType::VfsFile, ino, 0, true, true, {} };
+                fd_table_[fd].path = path;
             }
             regs.set(cpu::Reg::R0, static_cast<uint32_t>(fd));
         }
@@ -167,15 +172,64 @@ void Kernel::install_syscalls() {
                     mem.write8(buf + i, static_cast<uint8_t>(i * 0x6C + 0xB5));
                 regs.set(cpu::Reg::R0, len); break;
             }
+            case FdType::VfsFile: {
+                const std::string text = fs_.read_text(fd_table_[fd].path);
+                const uint32_t avail = static_cast<uint32_t>(text.size());
+                const uint32_t off   = fd_table_[fd].offset;
+                const uint32_t n     = (off < avail) ? std::min(len, avail - off) : 0u;
+                for (uint32_t i = 0; i < n; ++i)
+                    mem.write8(buf + i, static_cast<uint8_t>(text[off + i]));
+                fd_table_[fd].offset += n;
+                regs.set(cpu::Reg::R0, n);
+                break;
+            }
             default: regs.set(cpu::Reg::R0, 0); break;
             }
         }
     );
     cpu_.set_interrupt_handler(
         static_cast<uint8_t>(Syscall::WRITE_FD),
-        [](uint8_t, cpu::RegisterFile& regs, cpu::Memory&) {
+        [this](uint8_t, cpu::RegisterFile& regs, cpu::Memory& mem) {
+            const uint32_t fd  = regs.get(cpu::Reg::R0);
+            const uint32_t buf = regs.get(cpu::Reg::R1);
             const uint32_t len = regs.get(cpu::Reg::R2);
-            regs.set(cpu::Reg::R0, len);
+            if (fd >= FD_MAX || !fd_table_[fd].writable) {
+                regs.set(cpu::Reg::R0, ~0u); return;
+            }
+            switch (fd_table_[fd].type) {
+            case FdType::Tty: {
+                std::string s;
+                s.reserve(std::min(len, 65536u));
+                for (uint32_t i = 0; i < len && i < 65536u; ++i)
+                    s += static_cast<char>(mem.read8(buf + i));
+                if (!s.empty()) terminal_.print(s);
+                regs.set(cpu::Reg::R0, len);
+                break;
+            }
+            case FdType::DevNull:
+            case FdType::DevZero:
+                regs.set(cpu::Reg::R0, len);  // writes discarded
+                break;
+            case FdType::VfsFile: {
+                if (fd_table_[fd].path.empty()) { regs.set(cpu::Reg::R0, ~0u); return; }
+                std::string data;
+                data.reserve(std::min(len, 65536u));
+                for (uint32_t i = 0; i < len && i < 65536u; ++i)
+                    data += static_cast<char>(mem.read8(buf + i));
+                // Write into existing content at current offset.
+                std::string existing = fs_.read_text(fd_table_[fd].path);
+                const uint32_t off = fd_table_[fd].offset;
+                if (off > existing.size()) existing.resize(off, '\0');
+                existing.replace(off, data.size(), data);
+                fs_.write_file(fd_table_[fd].path, existing);
+                fd_table_[fd].offset += len;
+                regs.set(cpu::Reg::R0, len);
+                break;
+            }
+            default:
+                regs.set(cpu::Reg::R0, len);
+                break;
+            }
         }
     );
     cpu_.set_interrupt_handler(
@@ -218,6 +272,47 @@ void Kernel::install_syscalls() {
         [](uint8_t, cpu::RegisterFile& regs, cpu::Memory&) {
             regs.set(cpu::Reg::R0, ~0u);
         }
+    );
+    // CLONE: same as FORK on this platform not supported, return -1.
+    cpu_.set_interrupt_handler(
+        static_cast<uint8_t>(Syscall::CLONE),
+        [](uint8_t, cpu::RegisterFile& regs, cpu::Memory&) {
+            regs.set(cpu::Reg::R0, ~0u);
+        }
+    );
+    // WRITE_STR (legacy): R0 = NUL-terminated string address > print to terminal.
+    cpu_.set_interrupt_handler(
+        static_cast<uint8_t>(Syscall::WRITE_STR),
+        [this](uint8_t, cpu::RegisterFile& regs, cpu::Memory& mem) {
+            uint32_t addr = regs.get(cpu::Reg::R0);
+            std::string s;
+            for (uint32_t i = 0; i < 65536u; ++i) {
+                uint8_t c = mem.read8(addr + i);
+                if (!c) break;
+                s += static_cast<char>(c);
+            }
+            if (!s.empty()) terminal_.print(s);
+            regs.set(cpu::Reg::R0, static_cast<uint32_t>(s.size()));
+        }
+    );
+    // GETTIMEOFDAY: R0 = pointer to struct { uint32_t tv_sec; uint32_t tv_usec; }.
+    cpu_.set_interrupt_handler(
+        static_cast<uint8_t>(Syscall::GETTIMEOFDAY),
+        [this](uint8_t, cpu::RegisterFile& regs, cpu::Memory& mem) {
+            const uint32_t addr = regs.get(cpu::Reg::R0);
+            const uint32_t wall = wm_.wall_unix_sec();
+            const uint32_t usec = (tick_count_ % 120u) * (1000000u / 120u);
+            if (addr) {
+                mem.write32(addr,     wall);
+                mem.write32(addr + 4, usec);
+            }
+            regs.set(cpu::Reg::R0, 0);
+        }
+    );
+    // EXIT_GROUP: same semantics as EXIT for this single-threaded kernel.
+    cpu_.set_interrupt_handler(
+        static_cast<uint8_t>(Syscall::EXIT_GROUP),
+        [this](uint8_t, cpu::RegisterFile&, cpu::Memory&) { running_ = false; }
     );
 }
 
@@ -302,7 +397,7 @@ static constexpr SkillRow SKILL_ROWS[] = {
 
 static constexpr const char* ABOUT_LINES[] = {
     "Systems programmer & CS enjoyer.",
-    "Obsessed with the lowest level things: graphics, OS kernels, and demolishing school IT departments.",
+    "Obsessed with the lowest level things: graphics, OS kernels, demolishing school IT departments, ",
     "OS kernels, CPU emulators, compilers,",
     "GPU rasterizers, and anything that touches bare metal.",
     "Vulkan enjoyer, and number 1 enemy.",
@@ -506,6 +601,15 @@ static void render_about(gpu::GPU& g, os::WinRect area, int scroll, float dpr)
 
 void Kernel::load_init_program() {
     populate_portfolio_home(fs_);
+
+    // Load keybindings from /etc/keybindings.conf (written by init_vfs above).
+    parse_keybindings();
+
+    // Re-parse keybindings whenever the user saves /etc/keybindings.conf in nano.
+    terminal_.set_save_callback([this](const std::string& path) {
+        if (path == "/etc/keybindings.conf")
+            parse_keybindings();
+    });
     const std::size_t mem_mib = memory_.size() / (1024 * 1024);
     char boot_buf[160];
 
@@ -768,39 +872,134 @@ void Kernel::send_scroll(int delta) {
     wm_.handle_scroll(delta);
 }
 
+// Maps a key-name token from keybindings.conf to a JS virtual key code.
+static uint32_t kb_key_to_vk(const std::string& raw) noexcept {
+    if (raw.empty()) return 0;
+    if (raw.size() == 1) {
+        char c = static_cast<char>(std::toupper(static_cast<unsigned char>(raw[0])));
+        if (c >= 'A' && c <= 'Z') return static_cast<uint32_t>(c);
+        if (c >= '0' && c <= '9') return static_cast<uint32_t>(c);
+    }
+    // Case-insensitive named-key comparison.
+    auto eq = [&](const char* lit) noexcept -> bool {
+        const std::size_t n = std::strlen(lit);
+        if (raw.size() != n) return false;
+        for (std::size_t i = 0; i < n; ++i)
+            if (std::tolower(static_cast<unsigned char>(raw[i])) !=
+                std::tolower(static_cast<unsigned char>(lit[i]))) return false;
+        return true;
+    };
+    if (eq("tab"))                        return  9;
+    if (eq("return") || eq("enter"))      return 13;
+    if (eq("space"))                      return 32;
+    if (eq("escape") || eq("esc"))        return 27;
+    if (eq("up"))                         return 38;
+    if (eq("down"))                       return 40;
+    if (eq("left"))                       return 37;
+    if (eq("right"))                      return 39;
+    if (eq("home"))                       return 36;
+    if (eq("end"))                        return 35;
+    if (eq("pageup"))                     return 33;
+    if (eq("pagedown"))                   return 34;
+    if (eq("backspace"))                  return  8;
+    if (eq("delete") || eq("del"))        return 46;
+    if (eq("insert") || eq("ins"))        return 45;
+    if (raw.size() >= 2 && (raw[0] == 'F' || raw[0] == 'f')) {
+        const int n = std::atoi(raw.c_str() + 1);
+        if (n >= 1 && n <= 12) return static_cast<uint32_t>(111 + n);
+    }
+    return 0;
+}
+
+void Kernel::parse_keybindings() {
+    keybindings_.clear();
+    const std::string text = fs_.read_text("/etc/keybindings.conf");
+    if (text.empty()) return;
+
+    std::istringstream ss(text);
+    std::string line;
+    while (std::getline(ss, line)) {
+        // Strip CR and surrounding whitespace.
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+            line.pop_back();
+        std::size_t i0 = 0;
+        while (i0 < line.size() && (line[i0] == ' ' || line[i0] == '\t')) ++i0;
+        if (i0) line = line.substr(i0);
+        if (line.empty() || line[0] == '#') continue;
+
+        const auto eq_pos = line.find('=');
+        if (eq_pos == std::string::npos) continue;
+
+        std::string action  = line.substr(0, eq_pos);
+        std::string binding = line.substr(eq_pos + 1);
+
+        // Trim action.
+        while (!action.empty() && (action.back() == ' ' || action.back() == '\t')) action.pop_back();
+        // Trim binding.
+        while (!binding.empty() && (binding.front() == ' ' || binding.front() == '\t')) binding.erase(binding.begin());
+        while (!binding.empty() && (binding.back()  == ' ' || binding.back()  == '\t')) binding.pop_back();
+
+        // Skip empty, comment, or non-key bindings like "(click taskbar icon 1)".
+        if (action.empty() || binding.empty() || binding[0] == '(') continue;
+
+        // Split binding on '+': last token is the key name, earlier tokens are modifiers.
+        std::vector<std::string> parts;
+        std::string tok;
+        for (char c : binding) {
+            if (c == '+') { if (!tok.empty()) { parts.push_back(tok); tok.clear(); } }
+            else           tok += c;
+        }
+        if (!tok.empty()) parts.push_back(tok);
+        if (parts.empty()) continue;
+
+        KeyBinding kb;
+        kb.action = action;
+        for (std::size_t j = 0; j + 1 < parts.size(); ++j) {
+            std::string mod;
+            for (char c : parts[j])
+                mod += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if      (mod == "shift")                                     kb.shift = true;
+            else if (mod == "ctrl"  || mod == "control")                 kb.ctrl  = true;
+            else if (mod == "alt"   || mod == "option")                  kb.alt   = true;
+            else if (mod == "meta"  || mod == "super"
+                  || mod == "cmd"   || mod == "win")                     kb.meta  = true;
+        }
+        kb.vk = kb_key_to_vk(parts.back());
+        if (kb.vk == 0) continue;
+        keybindings_.push_back(std::move(kb));
+    }
+}
+
 void Kernel::send_key(uint32_t keycode, uint32_t charcode) {
     // Modifier bits packed in high half by JS (see index.html):
     //   bit16 = Shift, bit17 = Ctrl, bit18 = Alt, bit19 = Meta
     //   bit20 = keydown (1) vs keyup (0); bit21 = DOM autorepeat (keydown only)
-    const uint32_t key  = keycode & 0xFFFF;
+    const uint32_t key     = keycode & 0xFFFF;
     const bool     keydown = (keycode >> 20) & 1;
-    const bool     shift = (keycode >> 16) & 1;
-    const bool     ctrl  = (keycode >> 17) & 1;
-    const bool     alt   = (keycode >> 18) & 1;
-    (void)shift;
+    const bool     shift   = (keycode >> 16) & 1;
+    const bool     ctrl    = (keycode >> 17) & 1;
+    const bool     alt     = (keycode >> 18) & 1;
+    const bool     meta    = (keycode >> 19) & 1;
 
-    // Alt keybindings (global, handled before forwarding to WM).
-    if (alt && keydown) {
-        if (key == 9) {
-            wm_.toggle_launcher();
-            return;
-        }
-        if (key == 81 || key == 113) {
-            wm_.close_focused();
-            return;
-        }
-        if (key == 32) {
-            wm_.toggle_float_focused();
-            return;
-        }
-        if (key == 13) {
-            wm_.toggle_maximize_focused();
-            return;
+    // Dynamic keybinding dispatch driven by /etc/keybindings.conf.
+    if (keydown) {
+        for (const auto& kb : keybindings_) {
+            if (kb.vk == 0) continue;
+            if (kb.shift == shift && kb.ctrl == ctrl &&
+                kb.alt  == alt   && kb.meta == meta  && kb.vk == key) {
+                if      (kb.action == "close_window")    { wm_.close_focused(); return; }
+                else if (kb.action == "float_window")    { wm_.toggle_float_focused(); return; }
+                else if (kb.action == "maximize_window") { wm_.toggle_maximize_focused(); return; }
+                else if (kb.action == "open_launcher")   { wm_.toggle_launcher(); return; }
+                else if (kb.action == "cycle_focus")     { wm_.cycle_focus(); return; }
+                else if (kb.action == "minimize_window" && wm_.focused_id() >= 0) {
+                    wm_.toggle_minimize(wm_.focused_id()); return;
+                }
+            }
         }
     }
 
     wm_.handle_key(keycode, charcode);
-    (void)ctrl;
 }
 
 void Kernel::set_wall_time(uint32_t unix_sec) noexcept {

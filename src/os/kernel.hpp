@@ -46,9 +46,20 @@ enum class FdType : uint8_t { None, VfsFile, Tty, DevNull, DevZero, DevRandom };
 struct FileDescriptor {
     FdType   type    = FdType::None;
     uint32_t ino     = 0;      // inode number (for VfsFile)
-    uint32_t offset  = 0;      // current read position
+    uint32_t offset  = 0;      // current read/write position
     bool     readable = true;
     bool     writable = false;
+    std::string path;          // resolved path (VfsFile: used for flat-file read/write)
+};
+
+// A parsed entry from /etc/keybindings.conf.
+struct KeyBinding {
+    std::string action;
+    bool        shift = false;
+    bool        ctrl  = false;
+    bool        alt   = false;
+    bool        meta  = false;
+    uint32_t    vk    = 0;     // JS virtual key code (0 = unparsed/invalid)
 };
 
 class Kernel {
@@ -139,11 +150,16 @@ private:
     // Open file descriptor table (fd 0/1/2 = stdin/stdout/stderr = Tty).
     std::array<FileDescriptor, FD_MAX> fd_table_{};
 
+    // Parsed keybindings from /etc/keybindings.conf.
+    std::vector<KeyBinding> keybindings_;
+
     // Allocate the next free fd slot.  Returns -1 if table full.
     int alloc_fd() noexcept;
 
     void install_syscalls();
     void load_init_program();
+    // Parse /etc/keybindings.conf into keybindings_.  Safe to call at any time.
+    void parse_keybindings();
 };
 
 }  // namespace os

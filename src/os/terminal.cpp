@@ -64,8 +64,6 @@ static void t_text(gpu::GPU& g, int x, int y, uint32_t col, const std::string& s
     g.draw_text(r);
 }
 
-static const char* term_cwd() { return "/home/jade"; }
-
 static std::string trim_sp(const std::string& s) {
     std::string p = s;
     while (!p.empty() && p.front() == ' ') p.erase(p.begin());
@@ -73,16 +71,56 @@ static std::string trim_sp(const std::string& s) {
     return p;
 }
 
-static std::string resolve_vpath(std::string raw) {
+static bool match_glob(const std::string& text, const std::string& pat) {
+    const std::size_t n = text.size(), m = pat.size();
+    std::vector<std::vector<bool>> dp(n + 1, std::vector<bool>(m + 1, false));
+    dp[0][0] = true;
+    for (std::size_t j = 1; j <= m; ++j)
+        if (pat[j-1] == '*') dp[0][j] = dp[0][j-1];
+    for (std::size_t i = 1; i <= n; ++i)
+        for (std::size_t j = 1; j <= m; ++j) {
+            if (pat[j-1] == '*')
+                dp[i][j] = dp[i-1][j] || dp[i][j-1];
+            else if (pat[j-1] == '?' || pat[j-1] == text[i-1])
+                dp[i][j] = dp[i-1][j-1];
+        }
+    return dp[n][m];
+}
+
+static std::vector<std::string> split_args(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    bool in_sq = false, in_dq = false;
+    for (char c : s) {
+        if      (c == '\'' && !in_dq) in_sq = !in_sq;
+        else if (c == '"'  && !in_sq) in_dq = !in_dq;
+        else if ((c == ' ' || c == '\t') && !in_sq && !in_dq) {
+            if (!cur.empty()) { out.push_back(cur); cur.clear(); }
+        } else { cur += c; }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+std::string Terminal::resolve_vpath(const std::string& raw) const {
     std::string p = trim_sp(raw);
-    if (p.empty()) return p;
-    if (p == "~") return term_cwd();
+    if (p.empty() || p == ".") return cwd_;
+    if (p == "~") return std::string("/home/jade");
     if (p.size() >= 2 && p[0] == '~' && p[1] == '/')
         return std::string("/home/jade") + p.substr(1);
     if (p[0] == '/') return p;
+    if (p == "..") {
+        const auto sl = cwd_.rfind('/');
+        return (sl == 0) ? "/" : cwd_.substr(0, sl);
+    }
+    if (p.size() >= 3 && p[0] == '.' && p[1] == '.' && p[2] == '/') {
+        const auto sl = cwd_.rfind('/');
+        const std::string up = (sl == 0) ? "/" : cwd_.substr(0, sl);
+        return resolve_vpath(up + "/" + p.substr(3));
+    }
     if (p.size() >= 2 && p[0] == '.' && p[1] == '/')
-        return std::string(term_cwd()) + "/" + p.substr(2);
-    return std::string(term_cwd()) + "/" + p;
+        return cwd_ + "/" + p.substr(2);
+    return cwd_ + "/" + p;
 }
 
 static double sim_seconds(const uint32_t* sim_tick) noexcept {
@@ -162,6 +200,11 @@ void Terminal::configure(const Scheduler* sched, Filesystem* fs,
 }
 
 void Terminal::print(const std::string& s) {
+    if (capture_buf_) {
+        *capture_buf_ += s;
+        *capture_buf_ += '\n';
+        return;
+    }
     std::istringstream ss(s);
     std::string ln;
     while (std::getline(ss, ln)) {
@@ -192,17 +235,60 @@ void Terminal::execute(const std::string& raw) {
     }
     hist_idx_ = -1;
 
-    print("jade@jadeos:~$ " + cmd);
+    print(make_prompt() + cmd);
 
-    std::string verb, arg;
+    // Split on unquoted '|' into pipeline stages.
+    std::vector<std::string> stages;
     {
-        const auto sp = cmd.find(' ');
-        if (sp == std::string::npos) { verb = cmd; }
-        else { verb = cmd.substr(0, sp); arg = cmd.substr(sp + 1); }
-        while (!arg.empty() && arg.front() == ' ') arg.erase(arg.begin());
-        while (!arg.empty() && arg.back()  == ' ') arg.pop_back();
+        std::string cur;
+        bool in_sq = false, in_dq = false;
+        for (char c : cmd) {
+            if      (c == '\'' && !in_dq) in_sq = !in_sq;
+            else if (c == '"'  && !in_sq) in_dq = !in_dq;
+            else if (c == '|'  && !in_sq && !in_dq) { stages.push_back(cur); cur.clear(); continue; }
+            cur += c;
+        }
+        stages.push_back(cur);
     }
 
+    std::string pipe_stdin;
+    for (std::size_t i = 0; i < stages.size(); ++i) {
+        const std::string stage = trim_sp(stages[i]);
+        if (stage.empty()) continue;
+        std::string verb, arg;
+        const auto sp = stage.find(' ');
+        if (sp == std::string::npos) { verb = stage; }
+        else { verb = stage.substr(0, sp); arg = trim_sp(stage.substr(sp + 1)); }
+
+        if (i + 1 < stages.size()) {
+            pipe_stdin = run_stage(verb, arg, pipe_stdin);
+        } else {
+            dispatch(verb, arg, pipe_stdin);
+            if (nano_mode_) return;  // nano entered; skip trailing blank line
+        }
+    }
+    print("");
+}
+
+std::string Terminal::make_prompt() const {
+    std::string display = cwd_;
+    static const std::string HOME = "/home/jade";
+    if (display.rfind(HOME, 0) == 0)
+        display = "~" + display.substr(HOME.size());
+    return "jade@jadeos:" + display + "$ ";
+}
+
+std::string Terminal::run_stage(const std::string& verb, const std::string& arg,
+                                const std::string& stdin_text) {
+    std::string buf;
+    capture_buf_ = &buf;
+    dispatch(verb, arg, stdin_text);
+    capture_buf_ = nullptr;
+    return buf;
+}
+
+void Terminal::dispatch(const std::string& verb, const std::string& arg,
+                        const std::string& stdin_text) {
     if (verb.empty())          { /* blank line */ }
     else if (verb == "help")   cmd_help();
     else if (verb == "about")  cmd_about();
@@ -211,14 +297,18 @@ void Terminal::execute(const std::string& raw) {
     else if (verb == "contact") cmd_contact();
     else if (verb == "ls")     cmd_ls(arg);
     else if (verb == "cat")    cmd_cat(arg);
-    else if (verb == "uname") {
-        // uname and uname -a
-        cmd_uname(arg == "-a" || arg == "-r");
-    }
+    else if (verb == "cd")     cmd_cd(arg);
+    else if (verb == "grep")   cmd_grep(arg, stdin_text);
+    else if (verb == "find")   cmd_find(arg);
+    else if (verb == "cp")     cmd_cp(arg);
+    else if (verb == "mv")     cmd_mv(arg);
+    else if (verb == "rm")     cmd_rm(arg);
+    else if (verb == "touch")  cmd_touch(arg);
+    else if (verb == "head")   cmd_head(arg, stdin_text);
+    else if (verb == "tail")   cmd_tail(arg, stdin_text);
+    else if (verb == "uname")  cmd_uname(arg == "-a" || arg == "-r");
     else if (verb == "whoami") cmd_whoami();
-    else if (verb == "ps") {
-        cmd_ps(arg == "aux" || arg == "-aux" || arg == "-A");
-    }
+    else if (verb == "ps")     cmd_ps(arg == "aux" || arg == "-aux" || arg == "-A");
     else if (verb == "top")    cmd_top();
     else if (verb == "free")   cmd_free(arg == "-h" || arg == "-human");
     else if (verb == "df")     cmd_df(arg == "-h" || arg == "-human");
@@ -240,11 +330,10 @@ void Terminal::execute(const std::string& raw) {
             nano_scroll_   = 0;
             nano_modified_ = false;
             nano_mode_     = true;
-            return;
         }
     }
     else if (verb == "clear")  { ring_head_ = 0; ring_count_ = 0; }
-    else if (verb == "pwd")    print("/home/jade");
+    else if (verb == "pwd")    print(cwd_);
     else if (verb == "hostname") print("jadeos");
     else if (verb == "id")     print("uid=1000(jade) gid=1000(jade) groups=1000(jade),4(adm),24(cdrom)");
     else if (verb == "echo")   print(arg);
@@ -272,13 +361,11 @@ void Terminal::execute(const std::string& raw) {
         print("bash: " + verb + ": command not found");
         print("(type 'help' for available commands)");
     }
-    print("");
 }
 
 void Terminal::cmd_help() {
     print_lines({
         "JadeOS command reference",
-        "────────────────────────────────────────",
         "  about       -  who I am",
         "  skills      -  technical skills breakdown",
         "  projects    -  portfolio project list",
@@ -286,7 +373,16 @@ void Terminal::cmd_help() {
         "",
         "  ls [dir]    -  list directory",
         "  cat <path>  -  print file (incl. /proc/*)",
+        "  cd [dir]    -  change directory",
         "  pwd         -  print working directory",
+        "  find [path] [-name pat] [-type f|d]",
+        "  grep [-i] [-n] pattern [file]",
+        "  head [-n N] [file]",
+        "  tail [-n N] [file]",
+        "  cp <src> <dst>",
+        "  mv <src> <dst>",
+        "  rm [-rf] <path>",
+        "  touch <path>",
         "",
         "  ps [aux]    -  process list",
         "  top         -  live process snapshot",
@@ -296,12 +392,15 @@ void Terminal::cmd_help() {
         "  uname [-a]  -  kernel info",
         "  neofetch    -  system summary",
         "",
-        "  curl <url>  -  HTTP GET (WASM sync XHR; native uses curl(1))",
-        "  ping <host> -  RTT via HTTP HEAD (WASM) or system ping (native)",
+        "  curl <url>  -  HTTP GET",
+        "  ping <host> -  RTT probe",
         "  echo <str>  -  echo string",
         "  date        -  current date",
+        "  nano <path> -  text editor",
         "  clear       -  clear scrollback",
         "  exit        -  end session",
+        "",
+        "  pipe:  cmd1 | cmd2 | cmd3",
     });
 }
 
@@ -338,9 +437,19 @@ void Terminal::cmd_contact() {
 }
 
 void Terminal::cmd_ls(const std::string& arg) {
-    const std::string path = resolve_vpath(arg.empty() || arg == "." ? term_cwd() : arg);
+    const std::string path = resolve_vpath(arg);
 
     if (fs_) {
+        const uint32_t ino = fs_->lookup(path);
+        if (ino == 0) {
+            print("ls: cannot access '" + (arg.empty() ? path : arg) + "': No such file or directory");
+            return;
+        }
+        const Inode* node = fs_->stat(ino);
+        if (node && node->type != InodeType::Directory) {
+            print("ls: '" + (arg.empty() ? path : arg) + "': Not a directory");
+            return;
+        }
         const auto entries = fs_->readdir(path);
         if (!entries.empty()) {
             std::string line;
@@ -350,15 +459,11 @@ void Terminal::cmd_ls(const std::string& arg) {
                 if (line.size() > 72) { print(line); line.clear(); }
             }
             if (!line.empty()) print(line);
-            return;
         }
-        if (fs_->lookup(path) != 0) {
-            print("ls: '" + arg + "': Not a directory");
-            return;
-        }
+        return;
     }
 
-    print("ls: cannot access '" + arg + "': No such file or directory");
+    print("ls: cannot access '" + (arg.empty() ? path : arg) + "': No such file or directory");
 }
 
 void Terminal::cmd_cat(const std::string& arg) {
@@ -683,6 +788,243 @@ void Terminal::cmd_ping(const std::string& arg) {
 #endif
 }
 
+// ---- cd ---------------------------------------------------------------
+
+void Terminal::cmd_cd(const std::string& arg) {
+    const std::string target = resolve_vpath(arg.empty() ? "~" : arg);
+    if (!fs_) { cwd_ = target; return; }
+    const uint32_t ino = fs_->lookup(target);
+    if (ino == 0) { print("cd: " + arg + ": No such file or directory"); return; }
+    const Inode* node = fs_->stat(ino);
+    if (node && node->type != InodeType::Directory) {
+        print("cd: " + arg + ": Not a directory"); return;
+    }
+    cwd_ = target;
+}
+
+// ---- grep -------------------------------------------------------------
+
+void Terminal::cmd_grep(const std::string& arg, const std::string& stdin_text) {
+    const auto args = split_args(arg);
+    bool flag_i = false, flag_n = false;
+    std::string pattern;
+    std::vector<std::string> files;
+
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const auto& a = args[i];
+        if (a == "-i")               flag_i = true;
+        else if (a == "-n")          flag_n = true;
+        else if (a == "-in" || a == "-ni") { flag_i = true; flag_n = true; }
+        else if (pattern.empty())    pattern = a;
+        else                         files.push_back(a);
+    }
+    if (pattern.empty()) { print("grep: missing pattern"); return; }
+
+    auto to_lower_str = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+
+    auto grep_text = [&](const std::string& text, const std::string& filename) {
+        std::istringstream ss(text);
+        std::string ln;
+        int line_num = 0;
+        while (std::getline(ss, ln)) {
+            ++line_num;
+            const std::string haystack = flag_i ? to_lower_str(ln)      : ln;
+            const std::string needle   = flag_i ? to_lower_str(pattern) : pattern;
+            if (haystack.find(needle) == std::string::npos) continue;
+            std::string out;
+            if (!filename.empty() && files.size() > 1) out += filename + ":";
+            if (flag_n) out += std::to_string(line_num) + ":";
+            out += ln;
+            print(out);
+        }
+    };
+
+    if (files.empty()) {
+        grep_text(stdin_text, "");
+    } else {
+        for (const auto& f : files) {
+            const std::string path = resolve_vpath(f);
+            if (!fs_) continue;
+            const std::string text = fs_->read_text(path);
+            if (text.empty() && fs_->lookup(path) == 0) {
+                print("grep: " + f + ": No such file or directory");
+                continue;
+            }
+            grep_text(text, f);
+        }
+    }
+}
+
+// ---- find -------------------------------------------------------------
+
+void Terminal::cmd_find(const std::string& arg) {
+    const auto args = split_args(arg);
+    std::string root = cwd_;
+    std::string name_pat;
+    char type_filter = '\0';  // 'f' = files, 'd' = dirs
+
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == "-name" && i + 1 < args.size())
+            name_pat = args[++i];
+        else if (args[i] == "-type" && i + 1 < args.size())
+            type_filter = args[++i].empty() ? '\0' : args[++i][0];
+        else if (args[i][0] != '-')
+            root = resolve_vpath(args[i]);
+    }
+    if (!fs_) return;
+
+    // Recursively walk the VFS inode tree.
+    std::function<void(const std::string&)> walk = [&](const std::string& path) {
+        const auto entries = fs_->readdir(path);
+        for (const auto& entry : entries) {
+            const bool is_dir = !entry.empty() && entry.back() == '/';
+            const std::string name = is_dir ? entry.substr(0, entry.size() - 1) : entry;
+            const std::string full = path + (path.back() == '/' ? "" : "/") + name;
+
+            const bool name_ok = name_pat.empty() || match_glob(name, name_pat);
+            const bool type_ok = type_filter == '\0' ||
+                                 (type_filter == 'f' && !is_dir) ||
+                                 (type_filter == 'd' &&  is_dir);
+            if (name_ok && type_ok) print(full);
+            if (is_dir) walk(full);
+        }
+    };
+    walk(root);
+}
+
+// ---- cp ---------------------------------------------------------------
+
+void Terminal::cmd_cp(const std::string& arg) {
+    const auto args = split_args(arg);
+    if (args.size() < 2) { print("cp: missing destination operand"); return; }
+    if (!fs_) return;
+    const std::string src = resolve_vpath(args[0]);
+    const std::string dst = resolve_vpath(args[1]);
+    const std::string text = fs_->read_text(src);
+    if (text.empty() && fs_->lookup(src) == 0) {
+        print("cp: " + args[0] + ": No such file or directory"); return;
+    }
+    fs_->write_file(dst, text);
+}
+
+// ---- mv ---------------------------------------------------------------
+
+void Terminal::cmd_mv(const std::string& arg) {
+    const auto args = split_args(arg);
+    if (args.size() < 2) { print("mv: missing destination operand"); return; }
+    if (!fs_) return;
+    const std::string src = resolve_vpath(args[0]);
+    const std::string dst = resolve_vpath(args[1]);
+    if (!fs_->rename_file(src, dst))
+        print("mv: " + args[0] + ": No such file or directory");
+}
+
+// ---- rm ---------------------------------------------------------------
+
+void Terminal::cmd_rm(const std::string& arg) {
+    const auto args = split_args(arg);
+    std::vector<std::string> paths;
+    for (const auto& a : args) {
+        if (a == "-f" || a == "-r" || a == "-rf" || a == "-fr" ||
+            a == "-v" || a == "-rv" || a == "-fv") continue;
+        paths.push_back(a);
+    }
+    if (paths.empty()) { print("rm: missing operand"); return; }
+    if (!fs_) return;
+    for (const auto& p : paths) {
+        const std::string path = resolve_vpath(p);
+        if (!fs_->remove_file(path))
+            print("rm: cannot remove '" + p + "': No such file or directory");
+    }
+}
+
+// ---- touch ------------------------------------------------------------
+
+void Terminal::cmd_touch(const std::string& arg) {
+    const auto args = split_args(arg);
+    if (args.empty()) { print("touch: missing file operand"); return; }
+    if (!fs_) return;
+    for (const auto& a : args) {
+        const std::string path = resolve_vpath(a);
+        if (!fs_->find(path)) fs_->write_file(path, "");
+    }
+}
+
+// ---- head -------------------------------------------------------------
+
+void Terminal::cmd_head(const std::string& arg, const std::string& stdin_text) {
+    const auto args = split_args(arg);
+    int n = 10;
+    std::string file;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == "-n" && i + 1 < args.size())
+            n = std::atoi(args[++i].c_str());
+        else if (args[i].size() > 1 && args[i][0] == '-' &&
+                 std::isdigit(static_cast<unsigned char>(args[i][1])))
+            n = std::atoi(args[i].c_str() + 1);
+        else
+            file = args[i];
+    }
+
+    std::string text;
+    if (file.empty()) {
+        text = stdin_text;
+    } else {
+        if (!fs_) return;
+        const std::string path = resolve_vpath(file);
+        text = fs_->read_text(path);
+        if (text.empty() && fs_->lookup(path) == 0) {
+            print("head: " + file + ": No such file or directory"); return;
+        }
+    }
+
+    std::istringstream ss(text);
+    std::string ln;
+    for (int count = 0; count < n && std::getline(ss, ln); ++count)
+        print(ln);
+}
+
+// ---- tail -------------------------------------------------------------
+
+void Terminal::cmd_tail(const std::string& arg, const std::string& stdin_text) {
+    const auto args = split_args(arg);
+    int n = 10;
+    std::string file;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == "-n" && i + 1 < args.size())
+            n = std::atoi(args[++i].c_str());
+        else if (args[i].size() > 1 && args[i][0] == '-' &&
+                 std::isdigit(static_cast<unsigned char>(args[i][1])))
+            n = std::atoi(args[i].c_str() + 1);
+        else
+            file = args[i];
+    }
+
+    std::string text;
+    if (file.empty()) {
+        text = stdin_text;
+    } else {
+        if (!fs_) return;
+        const std::string path = resolve_vpath(file);
+        text = fs_->read_text(path);
+        if (text.empty() && fs_->lookup(path) == 0) {
+            print("tail: " + file + ": No such file or directory"); return;
+        }
+    }
+
+    std::vector<std::string> lines;
+    std::istringstream ss(text);
+    std::string ln;
+    while (std::getline(ss, ln)) lines.push_back(ln);
+
+    const int start = std::max(0, static_cast<int>(lines.size()) - n);
+    for (int i = start; i < static_cast<int>(lines.size()); ++i)
+        print(lines[i]);
+}
+
 void Terminal::send_key(uint32_t keycode, uint32_t charcode) {
     // JS sends keyup too (bit 20 clear); shell/nano only react to keydown.
     if (((keycode >> 20) & 1u) == 0) return;
@@ -691,22 +1033,12 @@ void Terminal::send_key(uint32_t keycode, uint32_t charcode) {
     blink_tick_ = 0;
 
     if (nano_mode_) {
-        // Ctrl+X  (keycode 88 with ctrl bit set, or raw charcode 24)
-        const bool ctrl_held = (keycode >> 17) & 1;
-        const uint32_t k     = keycode & 0xFFFF;
-        const bool is_ctrl_x = (ctrl_held && (k == 88 || k == 120)) ||
-                                (charcode == 24);
-        if (is_ctrl_x) {
-            // Save file via flat-file store.
-            if (fs_) fs_->write_file(nano_path_, nano_buf_);
-            nano_mode_ = false;
-            print("Saved " + nano_path_);
-            return;
-        }
+        const bool ctrl_held = (keycode >> 17) & 1u;
+        const uint32_t k     = keycode & 0xFFFFu;
 
-        // Split buffer into lines for manipulation
-        std::vector<std::string> lines;
-        {
+        // Helper: split buf into lines (used throughout)
+        auto get_lines = [&]() -> std::vector<std::string> {
+            std::vector<std::string> lines;
             std::size_t s = 0;
             while (true) {
                 auto e = nano_buf_.find('\n', s);
@@ -714,18 +1046,153 @@ void Terminal::send_key(uint32_t keycode, uint32_t charcode) {
                 lines.push_back(nano_buf_.substr(s, e - s));
                 s = e + 1;
             }
-        }
-        // Clamp cursor
-        nano_line_ = std::max(0, std::min(nano_line_, static_cast<int>(lines.size()) - 1));
-        nano_col_  = std::max(0, std::min(nano_col_,  static_cast<int>(lines[nano_line_].size())));
+            return lines;
+        };
 
-        auto rebuild = [&]() {
+        auto rebuild = [&](const std::vector<std::string>& lines) {
             nano_buf_.clear();
             for (std::size_t i = 0; i < lines.size(); ++i) {
                 if (i) nano_buf_ += '\n';
                 nano_buf_ += lines[i];
             }
         };
+
+        auto do_save = [&]() {
+            if (fs_) fs_->write_file(nano_path_, nano_buf_);
+            if (save_callback_) save_callback_(nano_path_);
+            nano_modified_ = false;
+            const int lc = static_cast<int>(std::count(nano_buf_.begin(), nano_buf_.end(), '\n')) + 1;
+            nano_status_ = "Wrote " + std::to_string(lc) + " line" + (lc == 1 ? "." : "s.");
+        };
+
+        // ----- Search mode (Ctrl+W active) -----
+        if (nano_search_mode_) {
+            if (k == 27 || (ctrl_held && (k == 'G' || k == 'g' || k == 87 || k == 119))) {
+                // Escape or Ctrl+G = cancel search
+                nano_search_mode_ = false;
+                nano_status_ = "";
+            } else if (k == 13) {
+                // Enter: find next occurrence
+                nano_search_mode_ = false;
+                if (!nano_search_str_.empty()) {
+                    const auto lines = get_lines();
+                    const int total = static_cast<int>(lines.size());
+                    bool found = false;
+                    for (int i = 1; i <= total; ++i) {
+                        const int r = (nano_line_ + i) % total;
+                        const auto pos = lines[r].find(nano_search_str_);
+                        if (pos != std::string::npos) {
+                            nano_line_ = r; nano_col_ = static_cast<int>(pos);
+                            nano_search_match_ = r;
+                            nano_status_ = "";
+                            found = true; break;
+                        }
+                    }
+                    if (!found) nano_status_ = "\"" + nano_search_str_ + "\": Not found";
+                }
+            } else if (k == 8 && !nano_search_str_.empty()) {
+                nano_search_str_.pop_back();
+            } else if (charcode >= 32 && charcode < 127) {
+                nano_search_str_ += static_cast<char>(charcode);
+            }
+            return;
+        }
+
+        // ----- Exit-save prompt (Ctrl+X when modified) -----
+        if (nano_exit_prompt_) {
+            const char ch = static_cast<char>(charcode);
+            if (ch == 'y' || ch == 'Y') {
+                do_save();
+                nano_mode_        = false;
+                nano_exit_prompt_ = false;
+                print("Saved " + nano_path_);
+            } else if (ch == 'n' || ch == 'N') {
+                nano_mode_        = false;
+                nano_exit_prompt_ = false;
+            } else if (k == 27 || (ctrl_held && (k == 'C' || k == 'c'))) {
+                // Ctrl+C / Escape = cancel
+                nano_exit_prompt_ = false;
+                nano_status_ = "";
+            }
+            return;
+        }
+
+        // ----- Normal editing -----
+
+        // Ctrl+O  - Write Out (save without exiting)
+        if (ctrl_held && (k == 'O' || k == 'o' || k == 79 || k == 111)) {
+            do_save();
+            return;
+        }
+        // Ctrl+X  - Exit
+        if (ctrl_held && (k == 'X' || k == 'x' || k == 88 || k == 120)) {
+            if (!nano_modified_) {
+                nano_mode_ = false;
+            } else {
+                nano_exit_prompt_ = true;
+                nano_status_ = "";
+            }
+            return;
+        }
+        // Ctrl+K  - Cut current line
+        if (ctrl_held && (k == 'K' || k == 'k' || k == 75 || k == 107)) {
+            auto lines = get_lines();
+            nano_cut_buf_ = lines[nano_line_];
+            lines.erase(lines.begin() + nano_line_);
+            if (lines.empty()) lines.push_back("");
+            nano_line_ = std::min(nano_line_, static_cast<int>(lines.size()) - 1);
+            nano_col_  = 0;
+            nano_modified_ = true; rebuild(lines);
+            nano_status_ = "";
+            return;
+        }
+        // Ctrl+U  - Uncut / Paste
+        if (ctrl_held && (k == 'U' || k == 'u' || k == 85 || k == 117)) {
+            if (!nano_cut_buf_.empty()) {
+                auto lines = get_lines();
+                lines.insert(lines.begin() + nano_line_, nano_cut_buf_);
+                nano_modified_ = true; rebuild(lines);
+                nano_status_ = "";
+            }
+            return;
+        }
+        // Ctrl+W  - Where Is (search)
+        if (ctrl_held && (k == 'W' || k == 'w' || k == 87 || k == 119)) {
+            nano_search_mode_ = true;
+            nano_search_str_  = "";
+            return;
+        }
+        // Ctrl+G  - Help (show shortcuts in status)
+        if (ctrl_held && (k == 'G' || k == 'g')) {
+            nano_status_ = "^O Write  ^X Exit  ^K Cut  ^U Paste  ^W Search";
+            return;
+        }
+        // Ctrl+A / Home on line  - First line
+        if (ctrl_held && (k == 'A' || k == 'a')) {
+            nano_line_ = 0; nano_col_ = 0; return;
+        }
+        // Ctrl+E / End  - Last line
+        if (ctrl_held && (k == 'E' || k == 'e')) {
+            const auto lines = get_lines();
+            nano_line_ = static_cast<int>(lines.size()) - 1;
+            nano_col_  = static_cast<int>(lines[nano_line_].size());
+            return;
+        }
+        // Page Up (Ctrl+Y or PgUp key 33)
+        if ((ctrl_held && (k == 'Y' || k == 'y')) || k == 33) {
+            nano_line_ = std::max(0, nano_line_ - 20); return;
+        }
+        // Page Down (Ctrl+V or PgDn key 34)
+        if ((ctrl_held && (k == 'V' || k == 'v')) || k == 34) {
+            const auto lines = get_lines();
+            nano_line_ = std::min(static_cast<int>(lines.size()) - 1, nano_line_ + 20);
+            return;
+        }
+
+        // Arrow / editing keys
+        auto lines = get_lines();
+        nano_line_ = std::max(0, std::min(nano_line_, static_cast<int>(lines.size()) - 1));
+        nano_col_  = std::max(0, std::min(nano_col_,  static_cast<int>(lines[nano_line_].size())));
 
         switch (k) {
         case 38: // Up
@@ -749,14 +1216,12 @@ void Terminal::send_key(uint32_t keycode, uint32_t charcode) {
                 lines[nano_line_].erase(static_cast<std::size_t>(nano_col_ - 1), 1);
                 --nano_col_;
             } else if (nano_line_ > 0) {
-                // Merge with previous line.
-                int prev_len = static_cast<int>(lines[nano_line_ - 1].size());
+                const int prev_len = static_cast<int>(lines[nano_line_ - 1].size());
                 lines[nano_line_ - 1] += lines[nano_line_];
                 lines.erase(lines.begin() + nano_line_);
-                --nano_line_;
-                nano_col_ = prev_len;
+                --nano_line_; nano_col_ = prev_len;
             }
-            nano_modified_ = true; rebuild(); break;
+            nano_modified_ = true; rebuild(lines); nano_status_ = ""; break;
         case 46: // Delete
             if (nano_col_ < static_cast<int>(lines[nano_line_].size())) {
                 lines[nano_line_].erase(static_cast<std::size_t>(nano_col_), 1);
@@ -764,21 +1229,21 @@ void Terminal::send_key(uint32_t keycode, uint32_t charcode) {
                 lines[nano_line_] += lines[nano_line_ + 1];
                 lines.erase(lines.begin() + nano_line_ + 1);
             }
-            nano_modified_ = true; rebuild(); break;
-        case 13: // Enter  -  split line
+            nano_modified_ = true; rebuild(lines); nano_status_ = ""; break;
+        case 13: // Enter
             {
                 std::string rest = lines[nano_line_].substr(static_cast<std::size_t>(nano_col_));
                 lines[nano_line_] = lines[nano_line_].substr(0, static_cast<std::size_t>(nano_col_));
                 lines.insert(lines.begin() + nano_line_ + 1, rest);
                 ++nano_line_; nano_col_ = 0;
             }
-            nano_modified_ = true; rebuild(); break;
+            nano_modified_ = true; rebuild(lines); nano_status_ = ""; break;
         default:
-            if (charcode >= 32 && charcode < 127) {
+            if (!ctrl_held && charcode >= 32 && charcode < 127) {
                 lines[nano_line_].insert(static_cast<std::size_t>(nano_col_), 1,
                                          static_cast<char>(charcode));
                 ++nano_col_;
-                nano_modified_ = true; rebuild();
+                nano_modified_ = true; rebuild(lines); nano_status_ = "";
             }
             break;
         }
@@ -840,11 +1305,11 @@ void Terminal::send_key(uint32_t keycode, uint32_t charcode) {
         break;
     case 9: { // Tab  -  complete command prefix
         static constexpr const char* CMDS[] = {
-            "about", "cat", "clear", "contact", "curl", "date",
-            "df", "echo", "exit", "free", "help", "hostname",
-            "id", "ls", "logout", "neofetch", "ping", "projects",
-            "ps", "pwd", "skills", "top", "uname", "uptime",
-            "wget", "whoami",
+            "about", "cat", "cd", "clear", "contact", "cp", "curl", "date",
+            "df", "echo", "exit", "find", "free", "grep", "head", "help",
+            "hostname", "id", "ls", "logout", "mv", "nano", "neofetch",
+            "ping", "projects", "ps", "pwd", "rm", "skills", "tail", "top",
+            "touch", "uname", "uptime", "vi", "vim", "wget", "whoami",
         };
         // Only complete when cursor is at end and input has no space.
         if (cursor_pos_ == static_cast<int>(input_.size()) &&
@@ -857,7 +1322,7 @@ void Terminal::send_key(uint32_t keycode, uint32_t charcode) {
                 input_      = matches[0];
                 cursor_pos_ = static_cast<int>(input_.size());
             } else if (matches.size() > 1) {
-                print("jade@jadeos:~$ " + input_);
+                print(make_prompt() + input_);
                 std::string row;
                 for (auto* m : matches) { row += m; row += "  "; }
                 print(row);
@@ -878,31 +1343,73 @@ void Terminal::send_key(uint32_t keycode, uint32_t charcode) {
 void Terminal::render(gpu::GPU& gpu, WinRect area, uint32_t tick) {
     sys_tick_ = tick;
     if (nano_mode_) {
-        const int sc_lh   = static_cast<int>(LINE_H   * dpr_ + 0.5f);
-        const int sc_pad  = static_cast<int>(4  * dpr_ + 0.5f);
-        const int HEADER_H = static_cast<int>(20 * dpr_ + 0.5f);
-        const int FOOTER_H = static_cast<int>(20 * dpr_ + 0.5f);
+        const int sc_lh    = static_cast<int>(LINE_H * dpr_ + 0.5f);
+        const int sc_pad   = static_cast<int>(6 * dpr_ + 0.5f);
+        const int BAR_H    = sc_lh + sc_pad;  // one row tall, matches line height
 
         // Background
         t_rect(gpu, area.x, area.y, area.w, area.h, 0xFF'07'1A'2E);
 
-        // Header bar (inverted)
-        t_rect(gpu, area.x, area.y, area.w, HEADER_H, 0xFF'89'B4'FA);
-        std::string hdr = "  GNU nano   -   ";
-        hdr += nano_path_;
-        if (nano_modified_) hdr += "  [Modified]";
-        t_text(gpu, area.x + sc_pad, area.y + sc_pad, 0xFF'07'1A'2E, hdr);
+        t_rect(gpu, area.x, area.y, area.w, BAR_H, 0xFF'89'B4'FA);
+        {
+            std::string fname = nano_path_;
+            static const std::string HOME = "/home/jade";
+            if (fname.rfind(HOME, 0) == 0) fname = "~" + fname.substr(HOME.size());
+            const std::string mod_tag = nano_modified_ ? " [Modified]" : "";
 
-        // Footer bar
-        const int foot_y = area.y + area.h - FOOTER_H;
-        t_rect(gpu, area.x, foot_y, area.w, FOOTER_H, 0xFF'1A'2E'48);
-        t_text(gpu, area.x + sc_pad, foot_y + sc_pad, 0xFF'50'C8'FF,
-               "^X  Save+Exit    ^G  Help    Arrow keys to move");
+            // Left: "GNU nano 7.2"  Centre: filename  Right: "Modified"
+            const std::string left_str  = "  GNU nano 7.2";
+            const std::string right_str = mod_tag + "  ";
+            const int lw = static_cast<int>(gpu.font(0).measure_width(left_str));
+            const int rw = static_cast<int>(gpu.font(0).measure_width(right_str));
+            const int fw = static_cast<int>(gpu.font(0).measure_width(fname));
+            const int cy = area.y + sc_pad;
+            t_text(gpu, area.x,                              cy, 0xFF'07'1A'2E, left_str);
+            t_text(gpu, area.x + (area.w - fw) / 2,         cy, 0xFF'07'1A'2E, fname);
+            t_text(gpu, area.x + area.w - rw,                cy, 0xFF'07'1A'2E, right_str);
+            (void)lw;
+        }
 
-        // Content area
-        const int content_y = area.y + HEADER_H;
-        const int content_h = area.h - HEADER_H - FOOTER_H;
+        const int foot_y  = area.y + area.h - BAR_H * 2;
+        const int foot_y2 = foot_y + BAR_H;
+        t_rect(gpu, area.x, foot_y,  area.w, BAR_H, 0xFF'89'B4'FA);
+        t_rect(gpu, area.x, foot_y2, area.w, BAR_H, 0xFF'89'B4'FA);
+
+        if (nano_exit_prompt_) {
+            t_text(gpu, area.x + sc_pad, foot_y  + sc_pad, 0xFF'07'1A'2E,
+                   "  Save modified buffer?  (Y)es  (N)o  ^C Cancel");
+        } else if (nano_search_mode_) {
+            t_text(gpu, area.x + sc_pad, foot_y  + sc_pad, 0xFF'07'1A'2E,
+                   "  Search: " + nano_search_str_ + "_");
+            t_text(gpu, area.x + sc_pad, foot_y2 + sc_pad, 0xFF'07'1A'2E,
+                   "  Enter: find next    ^G: cancel");
+        } else if (!nano_status_.empty()) {
+            t_text(gpu, area.x + sc_pad, foot_y  + sc_pad, 0xFF'07'1A'2E,
+                   "  " + nano_status_);
+            t_text(gpu, area.x + sc_pad, foot_y2 + sc_pad, 0xFF'07'1A'2E,
+                   "  ^G Help   ^X Exit   ^O Write Out   ^K Cut   ^U Paste   ^W Search");
+        } else {
+            // Real nano two-row shortcut bar
+            t_text(gpu, area.x + sc_pad, foot_y  + sc_pad, 0xFF'07'1A'2E,
+                   "  ^G Help   ^X Exit   ^O Write Out   ^K Cut Line   ^W Search");
+            t_text(gpu, area.x + sc_pad, foot_y2 + sc_pad, 0xFF'07'1A'2E,
+                   "  ^U Paste  ^Y Pg Up  ^V Pg Down     ^A First Line  ^E Last Line");
+        }
+
+        {
+            char pos_buf[32];
+            std::snprintf(pos_buf, sizeof(pos_buf), "[ line %d/%zu, col %d ]  ",
+                          nano_line_ + 1,
+                          std::count(nano_buf_.begin(), nano_buf_.end(), '\n') + 1,
+                          nano_col_ + 1);
+            const int pw = static_cast<int>(gpu.font(0).measure_width(pos_buf));
+            t_text(gpu, area.x + area.w - pw, foot_y2 + sc_pad, 0xFF'07'1A'2E, pos_buf);
+        }
+
+        const int content_y = area.y + BAR_H;
+        const int content_h = area.h - BAR_H - BAR_H * 2;
         const int max_lines = (sc_lh > 0) ? (content_h / sc_lh) : 1;
+        const int text_x    = area.x + sc_pad * 2;
 
         // Split buffer into lines
         std::vector<std::string> lines;
@@ -916,46 +1423,35 @@ void Terminal::render(gpu::GPU& gpu, WinRect area, uint32_t tick) {
             }
         }
 
-        // Adjust scroll to keep cursor visible
+        // Scroll to keep cursor visible
         if (nano_line_ < nano_scroll_) nano_scroll_ = nano_line_;
         if (nano_line_ >= nano_scroll_ + max_lines) nano_scroll_ = nano_line_ - max_lines + 1;
 
         const int L0 = nano_scroll_;
         const int L1 = std::min(L0 + max_lines, static_cast<int>(lines.size()));
         for (int r = L0; r < L1; ++r) {
-            const int ty = content_y + (r - L0) * sc_lh + sc_pad;
+            const int row_y  = content_y + (r - L0) * sc_lh;
+            const int text_y = row_y + sc_pad;
             const bool cur_row = (r == nano_line_);
-            if (cur_row) {
-                t_rect(gpu, area.x, content_y + (r - L0) * sc_lh,
-                       area.w, sc_lh, 0xFF'0A'20'3A);
-            }
-            t_text(gpu, area.x + sc_pad * 2, ty,
-                   cur_row ? 0xFF'C6'D0'F5 : TC_TEXT, lines[r]);
 
-            // Cursor block
-            if (cur_row) {
+            if (cur_row)
+                t_rect(gpu, area.x, row_y, area.w, sc_lh, 0xFF'0A'20'3A);
+
+            t_text(gpu, text_x, text_y, cur_row ? 0xFF'C6'D0'F5 : TC_TEXT, lines[r]);
+
+            if (cur_row && blink_on_) {
                 const std::string before =
-                    (nano_col_ <= static_cast<int>(lines[r].size()))
-                    ? lines[r].substr(0, static_cast<std::size_t>(nano_col_))
-                    : lines[r];
-                const int cx = area.x + sc_pad * 2 +
-                               static_cast<int>(gpu.font(0).measure_width(before));
-                if (blink_on_) {
-                    const gpu::FontAtlas& nf = gpu.font(0);
-                    const int row_base = content_y + (r - L0) * sc_lh + sc_pad;
-                    const int curs_y =
-                        row_base - static_cast<int>(nf.ascent() + 0.5f);
-                    const int curs_h = static_cast<int>(nf.line_height() + 0.5f);
-                    t_rect(gpu, cx, curs_y, 2, curs_h, 0xFF'89'B4'FA);
-                }
+                    lines[r].substr(0, std::min(static_cast<std::size_t>(nano_col_), lines[r].size()));
+                const int cx = text_x + static_cast<int>(gpu.font(0).measure_width(before));
+                const gpu::FontAtlas& nf = gpu.font(0);
+                const int curs_y = text_y - static_cast<int>(nf.ascent() + 0.5f);
+                const int curs_h = static_cast<int>(nf.line_height() + 0.5f);
+                t_rect(gpu, cx, curs_y, 2, curs_h, 0xFF'89'B4'FA);
             }
         }
 
         // Blink toggle
-        if ((tick - blink_tick_) >= 30) {
-            blink_on_   = !blink_on_;
-            blink_tick_ = tick;
-        }
+        if ((tick - blink_tick_) >= 30) { blink_on_ = !blink_on_; blink_tick_ = tick; }
         return;
     }
 
@@ -1016,7 +1512,7 @@ void Terminal::render(gpu::GPU& gpu, WinRect area, uint32_t tick) {
     // Input bar background
     t_rect(gpu, area.x, input_bar_y, area.w, sc_prompt_h, TC_BG);
 
-    static const std::string PROMPT = "jade@jadeos:~$ ";
+    const std::string PROMPT = make_prompt();
 
     // Prompt + input share one baseline vertically centered in the prompt bar.
     const gpu::FontAtlas& f0    = gpu.font(0);

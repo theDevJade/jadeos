@@ -3,10 +3,73 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 namespace os {
+
+#ifdef __EMSCRIPTEN__
+EM_JS(void, js_ls_set, (const char* key, const char* val), {
+    try { localStorage.setItem(UTF8ToString(key), UTF8ToString(val)); } catch(e) {}
+});
+
+EM_JS(void, js_ls_remove, (const char* key), {
+    try { localStorage.removeItem(UTF8ToString(key)); } catch(e) {}
+});
+
+EM_JS(char*, js_ls_get, (const char* key), {
+    const v = localStorage.getItem(UTF8ToString(key));
+    if (v === null) return 0;
+    const n = lengthBytesUTF8(v) + 1;
+    const p = _malloc(n);
+    stringToUTF8(v, p, n);
+    return p;
+});
+
+static constexpr const char* LS_INDEX  = "jadeos:__index__";
+static constexpr const char* LS_PREFIX = "jadeos:file:";
+
+static void ls_persist(const std::string& name, const std::string& text) {
+    js_ls_set((std::string(LS_PREFIX) + name).c_str(), text.c_str());
+    char* raw = js_ls_get(LS_INDEX);
+    std::string idx = raw ? std::string(raw) : "";
+    if (raw) std::free(raw);
+    const std::string entry = name + "\n";
+    if (idx.find(entry) == std::string::npos) idx += entry;
+    js_ls_set(LS_INDEX, idx.c_str());
+}
+
+static void ls_forget(const std::string& name) {
+    js_ls_remove((std::string(LS_PREFIX) + name).c_str());
+    char* raw = js_ls_get(LS_INDEX);
+    std::string idx = raw ? std::string(raw) : "";
+    if (raw) std::free(raw);
+    const std::string entry = name + "\n";
+    const auto pos = idx.find(entry);
+    if (pos != std::string::npos) idx.erase(pos, entry.size());
+    js_ls_set(LS_INDEX, idx.c_str());
+}
+
+static void ls_load_all(Filesystem& fs) {
+    char* raw = js_ls_get(LS_INDEX);
+    if (!raw) return;
+    std::string idx(raw);
+    std::free(raw);
+    std::istringstream ss(idx);
+    std::string name;
+    while (std::getline(ss, name)) {
+        if (name.empty()) continue;
+        char* vraw = js_ls_get((std::string(LS_PREFIX) + name).c_str());
+        if (!vraw) continue;
+        fs.write_file(name, std::string(vraw));
+        std::free(vraw);
+    }
+}
+#endif
 
 bool Filesystem::add_file(std::string name, std::vector<uint8_t> data) {
     if (files_.count(name)) return false;
@@ -21,7 +84,20 @@ void Filesystem::write_file(std::string name, std::string text) {
         it->second.data = std::move(data);
     } else {
         files_.emplace(name, FileEntry{ name, std::move(data) });
+        // Create a VFS inode so the file shows up in readdir / ls.
+        if (lookup(name) == 0) {
+            const auto slash = name.rfind('/');
+            const std::string parent_path =
+                (slash == std::string::npos || slash == 0) ? "/" : name.substr(0, slash);
+            const std::string fname =
+                (slash == std::string::npos) ? name : name.substr(slash + 1);
+            const uint32_t parent_ino = lookup(parent_path);
+            if (parent_ino != 0) make_file(parent_ino, fname.c_str());
+        }
     }
+#ifdef __EMSCRIPTEN__
+    if (persist_enabled_) ls_persist(name, text);
+#endif
 }
 
 std::string Filesystem::read_text(const std::string& name) const {
@@ -34,6 +110,30 @@ std::string Filesystem::read_text(const std::string& name) const {
 const FileEntry* Filesystem::find(const std::string& name) const {
     auto it = files_.find(name);
     return (it == files_.end()) ? nullptr : &it->second;
+}
+
+bool Filesystem::remove_file(const std::string& name) {
+    const bool ok = files_.erase(name) > 0;
+#ifdef __EMSCRIPTEN__
+    if (persist_enabled_ && ok) ls_forget(name);
+#endif
+    return ok;
+}
+
+bool Filesystem::rename_file(const std::string& from, const std::string& to) {
+    auto it = files_.find(from);
+    if (it == files_.end()) return false;
+    FileEntry entry = std::move(it->second);
+    entry.name = to;
+    files_.erase(it);
+    files_.emplace(to, std::move(entry));
+#ifdef __EMSCRIPTEN__
+    if (persist_enabled_) {
+        ls_forget(from);
+        ls_persist(to, read_text(to));
+    }
+#endif
+    return true;
 }
 
 uint32_t Filesystem::make_dir(uint32_t parent_ino, const char* name) {
@@ -147,12 +247,14 @@ void Filesystem::init_vfs() {
         "# Edit with: nano /etc/keybindings.conf\n"
         "# Syntax:  action = ModKey+Key\n"
         "# Modifiers: Alt  Ctrl  Shift  Meta\n"
+        "# Note: 'Alt' = Option on macOS.\n"
+        "# Alt+Tab is captured by the OS on Windows/Linux so Alt+F1 is used instead.\n"
         "#\n"
         "close_window      = Alt+Q\n"
         "float_window      = Alt+Space\n"
         "maximize_window   = Alt+Return\n"
-        "open_launcher     = Alt+Tab\n"
-        "cycle_focus       = Alt+Tab\n"
+        "open_launcher     = Alt+F1\n"
+        "cycle_focus       = Alt+F1\n"
         "minimize_window   = Alt+H\n"
         "terminal          = (click taskbar icon 1)\n";
     write_file("/etc/keybindings.conf",
@@ -168,6 +270,12 @@ void Filesystem::init_vfs() {
         { "/dev",  "devfs",   dev_ino   },
         { "/tmp",  "tmpfs",   tmp_ino   },
     };
+
+#ifdef __EMSCRIPTEN__
+    // Load user-persisted files from localStorage, overriding ROM defaults.
+    ls_load_all(*this);
+    persist_enabled_ = true;
+#endif
 }
 
 const Inode* Filesystem::stat(uint32_t ino) const {

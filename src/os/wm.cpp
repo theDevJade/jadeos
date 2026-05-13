@@ -666,7 +666,6 @@ void WindowManager::draw_launcher() {
     g_rect_a(L.px + sc(4), L.py + sc(6), L.pw, L.ph, 0x50'00'10'30);
     g_rect_a(L.px + sc(2), L.py + sc(3), L.pw, L.ph, 0x30'00'10'30);
 
-    // ── Theme colours (matching window chrome palette) ──────────────────
     constexpr uint32_t kCard       = 0xFF'0D'15'26;  // dark-navy card bg
     constexpr uint32_t kAccent     = 0xFF'89'B4'FA;  // Catppuccin blue accent
     constexpr uint32_t kBorderSide = 0xFF'2A'3D'5E;  // subtle side/bottom border
@@ -696,7 +695,6 @@ void WindowManager::draw_launcher() {
     g_line(brd - 1, L.py, brd - 1, btm, kBorderSide);
     g_line(L.px,    btm - 1, brd,  btm - 1, kBorderSide);
 
-    // ── Search input field ───────────────────────────────────────────────
     const int inner_x = L.px + L.pad;
     const int inner_w = L.pw - L.pad * 2;
     const int head_y  = L.py + L.pad;
@@ -731,7 +729,6 @@ void WindowManager::draw_launcher() {
     // Separator between search field and window list.
     g_line(L.px, L.list_y - sc(1), L.px + L.pw, L.list_y - sc(1), kBorderSide);
 
-    // ── Window list ──────────────────────────────────────────────────────
     const int inset  = sc(6);
     const int icon_r = sc(16);
 
@@ -799,7 +796,6 @@ void WindowManager::draw_launcher() {
                    L.px + L.pw - inset, ry + L.row_h - 1, kSeparator);
     }
 
-    // ── Footer hint ──────────────────────────────────────────────────────
     const int foot_b =
         L.list_y + (std::max)(n, 1) * L.row_h + sc(6)
         + static_cast<int>((L.footer_h - sc(6) - f0.line_height()) * 0.5f + f0.ascent() + 0.5f);

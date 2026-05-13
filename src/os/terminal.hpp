@@ -26,6 +26,10 @@ public:
 
     void print(const std::string& s);
 
+    // Called after nano saves a file; path is the absolute VFS path written.
+    using SaveCallback = std::function<void(const std::string& path)>;
+    void set_save_callback(SaveCallback cb) { save_callback_ = std::move(cb); }
+
 private:
     static constexpr int MAX_LINES  = 1000;
     static constexpr int LINE_H     = 17;
@@ -51,16 +55,40 @@ private:
     const uint32_t*     sim_tick_ = nullptr;
     std::size_t       mem_bytes_ = 0;
     uint32_t          sys_tick_  = 0;
+    SaveCallback      save_callback_;
 
-    bool        nano_mode_   = false;
+    std::string       cwd_         = "/home/jade";
+    std::string*      capture_buf_ = nullptr;  // when non-null, print() writes here
+
+    bool        nano_mode_     = false;
     std::string nano_path_;
     std::string nano_buf_;
-    int         nano_line_   = 0;   // cursor line
-    int         nano_col_    = 0;   // cursor column
-    int         nano_scroll_ = 0;
+    int         nano_line_     = 0;
+    int         nano_col_      = 0;
+    int         nano_scroll_   = 0;
     bool        nano_modified_ = false;
+    std::string nano_cut_buf_;           // Ctrl+K cut buffer
+    std::string nano_status_;            // bottom status message
+    bool        nano_exit_prompt_ = false; // "Save modified? Y/N/^C"
+    bool        nano_search_mode_ = false; // Ctrl+W search bar active
+    std::string nano_search_str_;        // incremental search string
+    int         nano_search_match_ = -1; // line of last found match (-1 = none)
 
     void print_lines(std::initializer_list<const char*> ls);
+
+    // Path resolution: relative/~ paths resolved against cwd_.
+    std::string resolve_vpath(const std::string& raw) const;
+
+    // Current directory prompt string: "jade@jadeos:~/path$ "
+    std::string make_prompt() const;
+
+    // Run verb+arg with stdin_text, capture output into a string (for pipes).
+    std::string run_stage(const std::string& verb, const std::string& arg,
+                          const std::string& stdin_text);
+
+    // Main command dispatcher (called from execute and run_stage).
+    void dispatch(const std::string& verb, const std::string& arg,
+                  const std::string& stdin_text);
 
     void execute(const std::string& cmd);
 
@@ -81,6 +109,16 @@ private:
     void cmd_neofetch();
     void cmd_curl(const std::string& arg);
     void cmd_ping(const std::string& arg);
+
+    void cmd_cd(const std::string& arg);
+    void cmd_grep(const std::string& arg, const std::string& stdin_text);
+    void cmd_find(const std::string& arg);
+    void cmd_cp(const std::string& arg);
+    void cmd_mv(const std::string& arg);
+    void cmd_rm(const std::string& arg);
+    void cmd_touch(const std::string& arg);
+    void cmd_head(const std::string& arg, const std::string& stdin_text);
+    void cmd_tail(const std::string& arg, const std::string& stdin_text);
 };
 
 } // namespace os

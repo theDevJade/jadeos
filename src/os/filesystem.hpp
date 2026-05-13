@@ -57,6 +57,8 @@ public:
     // Flat-file API (jadefs ROM assets).
     bool             add_file(std::string name, std::vector<uint8_t> data);
     void             write_file(std::string name, std::string text);  // create or overwrite
+    bool             remove_file(const std::string& name);            // erase from flat store
+    bool             rename_file(const std::string& from, const std::string& to); // move in flat store
     std::string      read_text(const std::string& name) const;        // "" if not found
     const FileEntry* find(const std::string& name) const;
 
@@ -93,6 +95,7 @@ private:
     uint32_t                                   next_ino_  = 2; // 1 = root
     mutable uint32_t                           rand_state_= 0x8B4F2C1D;
     const Scheduler*                           proc_sched_ = nullptr;
+    bool                                       persist_enabled_ = false;
 
     uint32_t make_dir   (uint32_t parent_ino, const char* name);
     uint32_t make_file  (uint32_t parent_ino, const char* name);
