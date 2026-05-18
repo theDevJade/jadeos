@@ -25,6 +25,7 @@ static constexpr uint32_t COL_BG = 0xFF'08'0F'18;
 namespace os {
 
 // Fake boot ROM: CLEAR to COL_BG via GPU syscall 0x10, then HALT.
+// Implementing a full bootloader would be enermous overkill for this project.
 static constexpr uint8_t INIT_ROM[] = {
     static_cast<uint8_t>(cpu::Opcode::LOAD), 0x00,
     0x01, 0x00, 0x00, 0x00,
@@ -53,6 +54,7 @@ void Kernel::boot(uint32_t mem_mib, std::vector<uint8_t> ttf_data,
     memory_.reset(mem_bytes);
     cpu_.reset();
 
+    // magic number!
     cpu_.set_pc(0x1000);
     memory_.load(0x1000, std::span<const uint8_t>(INIT_ROM, sizeof(INIT_ROM)));
 
@@ -354,6 +356,8 @@ struct Project {
     const char* name; uint32_t col;
     const char* desc; const char* tech; const char* url;
 };
+
+// yeah yeah its hardcoded, but this is a portfolio OS, not a general-purpose one :P
 constexpr Project PROJS[] = {
     { "JadeOS",
       0xFF'2A'90'CF,
@@ -397,13 +401,13 @@ static constexpr SkillRow SKILL_ROWS[] = {
 
 static constexpr const char* ABOUT_LINES[] = {
     "Systems programmer & CS enjoyer.",
-    "Obsessed with the lowest level things: graphics, OS kernels, demolishing school IT departments, ",
+    "Obsessed with the lowest level things: graphics, emulators,",
     "OS kernels, CPU emulators, compilers,",
     "GPU rasterizers, and anything that touches bare metal.",
     "Vulkan enjoyer, and number 1 enemy.",
     "",
     "Currently: Knull + Vixen, a huge space game written in scratch in Rust,",
-    " and Mixtape, an open source music player for all platforms written in Flutter."
+    "and Mixtape, an open source music player for all platforms written in Flutter."
 };
 
 struct ContactRow {
@@ -613,6 +617,8 @@ void Kernel::load_init_program() {
     const std::size_t mem_mib = memory_.size() / (1024 * 1024);
     char boot_buf[160];
 
+
+    // ja tis fake, but it adds some flavor to the boot process and shows off the terminal rendering :P
     terminal_.print("");
     terminal_.print("[    0.000] JadeOS 1.0.0 - Custom RISC/Software-GPU OS");
     std::snprintf(boot_buf, sizeof(boot_buf),
@@ -825,6 +831,8 @@ void Kernel::tick(uint64_t cpu_cycles_per_tick) {
 
     // Spring physics and frame render run every kernel tick so window
     // positions in the GPU command buffer are always up-to-date.
+    // in a desktop envi we have the resource power to call this in the scheduler, but on the browser doing so will cause lag, stutter
+    // and other issues.
     wm_.step_animations(1.0f / 120.0f);
 
     push(gpu_, gpu::Command::CLEAR, COL_BG);

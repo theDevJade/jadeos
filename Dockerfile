@@ -88,7 +88,7 @@ RUN meson setup /build --cross-file=cross/emscripten.ini \
 
 # Match serve.sh: site root plus media/ for media.app.
 RUN mkdir -p /opt/site/media \
-    && cp web/index.html web/favicon.svg /opt/site/ \
+    && cp web/index.html web/favicon.svg web/styles.css web/main.js /opt/site/ \
     && cp /build/src/jadeportfolio.js /build/src/jadeportfolio.wasm /opt/site/ \
     && cp web/freedoom1.wad /opt/site/freedoom1.wad \
     && cp assets/fonts/Hack-Regular.ttf /opt/site/Hack-Regular.ttf \

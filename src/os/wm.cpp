@@ -207,7 +207,8 @@ void WindowManager::recompute_layout() noexcept {
     }
 }
 
-// Critically damped springs (K=1800, D=90, ~90ms settle). Non-overlapping layout avoids a PBD pass.
+// Critically damped springs
+// also thank you hyprland for some of the inspiration for this, your code is very clean and easy to read <3
 void WindowManager::step_animations(float dt) noexcept {
     constexpr float K       = 1800.0f;
     constexpr float D       =   90.0f;

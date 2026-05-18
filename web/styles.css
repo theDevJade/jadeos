@@ -1,0 +1,149 @@
+/* Reset first */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* terminal-esque */
+html, body {
+  width: 100%;
+  height: 100%;
+  background: #04090f;
+  overflow: hidden;
+  font-family: 'Courier New', monospace;
+  color: #a0c8e8;
+}
+
+/* Yay more flex boxes */
+#boot-ui {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  text-align: center;
+}
+
+#boot-ui h1 {
+  font-size: 2.2rem;
+  letter-spacing: 0.4em;
+  color: #2a90cf;
+  text-transform: uppercase;
+}
+
+#boot-ui .sub {
+  font-size: 0.72rem;
+  color: #2d5a7a;
+  letter-spacing: 0.2em;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.field label {
+  font-size: 0.68rem;
+  letter-spacing: 0.28em;
+  color: #2d5a7a;
+  text-transform: uppercase;
+}
+
+/* Consistency yall! */
+select {
+  background: #071828;
+  color: #80b8d8;
+  border: 1px solid #1a4a70;
+  padding: 8px 24px;
+  font-family: inherit;
+  font-size: 0.88rem;
+  cursor: pointer;
+  outline: none;
+  min-width: 170px;
+  text-align: center;
+}
+
+select:focus { border-color: #2a90cf; }
+
+#boot-btn {
+  background: #071828;
+  color: #2a90cf;
+  border: 1px solid #2a90cf;
+  padding: 11px 52px;
+  font-family: inherit;
+  font-size: 0.9rem;
+  letter-spacing: 0.3em;
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: background 0.12s;
+}
+
+#boot-btn:hover { background: #0d2a42; }
+#boot-btn:active { background: #091e30; }
+
+/* Tiny fake loading animation thing. */
+.dots::after {
+  content: '';
+  animation: blink-dots 1.2s step-start infinite;
+}
+
+@keyframes blink-dots {
+  0% { content: ''; }
+  25% { content: '.'; }
+  50% { content: '..'; }
+  75% { content: '...'; }
+}
+
+canvas {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  cursor: default;
+}
+
+#fps {
+  display: none;
+  position: fixed;
+  bottom: 8px;
+  right: 12px;
+  font-size: 0.72rem;
+  letter-spacing: 0.15em;
+  color: rgba(42, 144, 207, 0.7);
+  pointer-events: none;
+  z-index: 9;
+}
+
+/* Preload status box, bc users dont want to think its frozen */
+#clip-preload {
+  display: none;
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 30;
+  min-width: 280px;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 12px 16px;
+  background: rgba(7, 24, 40, 0.92);
+  border: 1px solid #2a90cf;
+  border-radius: 4px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+}
+
+#clip-preload .clip-preload-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  color: #80b8d8;
+  text-align: center;
+}
+
+#clip-preload progress {
+  width: 100%;
+  height: 10px;
+  accent-color: #2a90cf;
+}
