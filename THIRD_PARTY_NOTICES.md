@@ -14,5 +14,5 @@ My patches and overlay files under `third_party/patches/` inherit the license of
 ## Fonts and media
 
 - **`assets/fonts/Hack-Regular.ttf`**: [Hack](https://sourcefoundry.org/hack/) font, under the Hack Open Font License and Bitstream Vera terms. See the upstream repo for full text.
-- **`assets/images/amazingimage.png`**: placeholder — swap in your own if you fork this.
+- **`assets/images/amazingimage.png`**: placeholder, funny meme.
 - **Bad Apple clip**: the source MP4, exported PNG frames, `audio.wav`, and `sequence.txt` under `assets/videos/badapple/` are gitignored. You're responsible for rights on any source video and ffmpeg license compliance when running the export script.
